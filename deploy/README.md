@@ -26,10 +26,10 @@ systemctl --user disable --now bent
 deploy/install.sh
 ```
 
-Left behind by the conversion (not in this version): comments, likes,
-images, tags, schedules, custom domains. Users, passkeys, sessions, blogs,
-authors and posts (published text and the editor's current text) carry
-over. To go back: `systemctl --user disable --now slopstack`, restore the
+The conversion carries over users, passkeys, sessions, blogs, authors,
+posts (published text and the editor's current text), comments, likes
+and images. Left behind: tags, schedules and custom domains (the live
+site has none of them). To go back: `systemctl --user disable --now slopstack`, restore the
 first version's `caddy.service` and `Caddyfile` (`~/web/deploy`), and
 `systemctl --user enable --now bent caddy`.
 
