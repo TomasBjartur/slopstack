@@ -57,4 +57,11 @@ CPU throttled. Sizes nobody tested are where the first version broke.
 ## Checks (all before committing)
 
 - `tools/check.sh`: Verus on every proved module, Lean proofs, the unit
-  and property tests, the simulator's seeds, the 10x performance tests.
+  and property tests, the simulator's seeds, the 10x performance tests,
+  the WebAssembly build against the native one, the CRDT against Lean.
+- `tools/check_e2e.sh`: every end-to-end suite (HTTP flows and attacks,
+  passkeys, sync, red team, workers, real Chrome: browser, collab,
+  editor, large, usability, ux; the fuzzer).
+- `tests/bench.py` (optional, ~10 min): against the first version, its
+  Next.js baseline and a real Substack post; writes `docs/bench.json`.
+- Deploying: `deploy/README.md` (ask first: it replaces the live site).
