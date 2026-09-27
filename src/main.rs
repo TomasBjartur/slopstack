@@ -73,6 +73,13 @@ fn run() {
                     eprintln!("{n} refs x3 (then text): {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
                 }
             }
+            "render" => {
+                // Markdown on stdin, its HTML on stdout (tests/wasm_test.mjs).
+                use std::io::{Read, Write};
+                let mut md = vec![];
+                std::io::stdin().read_to_end(&mut md).expect("stdin");
+                std::io::stdout().write_all(markdown::render(&md).bytes()).expect("stdout");
+            }
             "mdbench" => {
                 let para = "The river of long evenings carries *small boats* past old walls where people talk about **books** and [maps](https://example.com). ".repeat(8) + "\n\n";
                 let six = para.repeat(6_000_000 / para.len());

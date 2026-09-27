@@ -18,5 +18,8 @@ for t in crdt crypto db http markdown sim; do
   echo "-- $t"
   build/server test $t | tail -4
 done
+echo "== the browser's WebAssembly against the server's build"
+tools/build_wasm.sh
+"$HOME/opt/node/bin/node" tests/wasm_test.mjs | tail -1
 echo "== the CRDT against the Lean model"
 tests/crdt_lean.sh 50 | tail -1
