@@ -95,12 +95,46 @@ fn run() {
         return;
     }
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8190);
-    // The database first (migrated): nobody connects before it is ready.
     let path = std::env::var("BLOG_DB").unwrap_or_else(|_| "blog.db".into());
-    let st = db::Store::open(&path).unwrap_or_else(|e| panic!("cannot open {path}: {e:?}"));
+    // WORKER PROCESSES (BLOG_WORKERS, default 1): one event loop each, on
+    // one shared listening socket; each opens its own database connection
+    // (SQLite in WAL mode: one writer at a time, many readers). What they
+    // share is only the database: caches catch up with it (src/docs.rs) or
+    // are keyed by what it says (post pages by updated_ms).
+    let workers: u32 = std::env::var("BLOG_WORKERS").ok().and_then(|w| w.parse().ok()).unwrap_or(1).clamp(1, 64);
+    // The database is migrated once, before anyone connects.
+    drop(db::Store::open(&path).unwrap_or_else(|e| panic!("cannot open {path}: {e:?}")));
+    let listener = sys::linux::listen_loopback(port, 4096).unwrap_or_else(|e| panic!("cannot listen on {port}: errno {e}"));
+    eprintln!("listening on 127.0.0.1:{port} ({workers} worker(s))");
+    if workers == 1 {
+        serve(listener, false, &path, port);
+    }
+    let me = std::process::id() as i32;
+    let spawn = || match sys::linux::fork_process() {
+        Ok(0) => {
+            sys::linux::die_with_parent(me);
+            serve(listener, true, &path, port);
+        }
+        Ok(pid) => pid,
+        Err(e) => panic!("fork: errno {e}"),
+    };
+    let mut pids: Vec<i32> = (0..workers).map(|_| spawn()).collect();
+    // Supervision: a worker that ends is replaced (after a pause, so a
+    // worker that dies at once does not spin).
+    loop {
+        let Ok(pid) = sys::linux::wait_child() else { continue };
+        if let Some(i) = pids.iter().position(|&p| p == pid) {
+            eprintln!("worker {pid} ended; starting another");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            pids[i] = spawn();
+        }
+    }
+}
+
+fn serve(listener: sys::linux::fd, shared: bool, path: &str, port: u16) -> ! {
+    let st = db::Store::open(path).unwrap_or_else(|e| panic!("cannot open {path}: {e:?}"));
     let site = site::Site::new(st, site::Conf::from_env(port));
-    let io = io::LinuxIo::new(port).unwrap_or_else(|e| panic!("cannot listen on {port}: errno {e}"));
-    eprintln!("listening on 127.0.0.1:{port}");
+    let io = io::LinuxIo::on(listener, shared).unwrap_or_else(|e| panic!("epoll: errno {e}"));
     let mut s = server::Server::new(io, site);
     loop {
         s.turn(1000);

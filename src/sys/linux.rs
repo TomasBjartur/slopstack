@@ -42,6 +42,10 @@ extern "C" {
     fn epoll_wait(ep: c_int, evs: *mut epoll_event, max: c_int, timeout: c_int) -> c_int;
     fn clock_gettime(clk: c_int, ts: *mut timespec) -> c_int;
     fn getrandom(buf: *mut c_void, n: usize, flags: u32) -> isize;
+    fn fork() -> c_int;
+    fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+    fn prctl(option: c_int, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> c_int;
+    fn getppid() -> c_int;
     fn __errno_location() -> *mut c_int;
 }
 
@@ -59,6 +63,10 @@ pub const EPOLLERR: u32 = 0x8;
 pub const EPOLLHUP: u32 = 0x10;
 pub const EPOLLRDHUP: u32 = 0x2000;
 pub const EPOLLET: u32 = 1 << 31;
+/// Of several epolls waiting on one listener, wake one (worker processes).
+pub const EPOLLEXCLUSIVE: u32 = 1 << 28;
+const PR_SET_PDEATHSIG: c_int = 1;
+const SIGTERM: u64 = 15;
 const EPOLL_CTL_ADD: c_int = 1;
 const EPOLL_CTL_DEL: c_int = 2;
 const EPOLL_CLOEXEC: c_int = 0o2000000;
@@ -89,6 +97,50 @@ pub fn listen_loopback(port: u16, backlog: i32) -> Result<fd, c_int> {
         }
         Ok(s)
     }
+}
+
+// PROCESSES (worker processes: src/main.rs)
+/// fork(2): Ok(0) in the child, Ok(pid) in the parent.
+pub fn fork_process() -> Result<i32, c_int> {
+    // SAFETY: fork has no pointer arguments. The caller forks before
+    // opening anything that must not be shared (the database is opened in
+    // each child, after the fork) and before starting threads (there are
+    // none).
+    let pid = unsafe { fork() };
+    if pid < 0 { Err(errno()) } else { Ok(pid) }
+}
+
+/// Waits for any child to end: its pid.
+pub fn wait_child() -> Result<i32, c_int> {
+    let mut status: c_int = 0;
+    loop {
+        // SAFETY: status is a local that outlives the call.
+        let pid = unsafe { waitpid(-1, &mut status, 0) };
+        if pid >= 0 {
+            return Ok(pid);
+        }
+        let e = errno();
+        if e != EINTR {
+            return Err(e);
+        }
+    }
+}
+
+/// This process gets SIGTERM when its parent ends (and ends now if the
+/// parent already has).
+pub fn die_with_parent(parent: i32) {
+    // SAFETY: prctl with integer arguments only; getppid has none.
+    unsafe {
+        prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
+        if getppid() != parent {
+            std::process::exit(0);
+        }
+    }
+}
+
+pub fn parent_pid() -> i32 {
+    // SAFETY: no arguments.
+    unsafe { getppid() }
 }
 
 /// The next connection, non-blocking, with Nagle off; Err(EAGAIN) if none.

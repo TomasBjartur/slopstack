@@ -54,9 +54,15 @@ pub struct LinuxIo {
 
 impl LinuxIo {
     pub fn new(port: u16) -> Result<LinuxIo, i32> {
-        let listener = sys::listen_loopback(port, 4096)?;
+        LinuxIo::on(sys::listen_loopback(port, 4096)?, false)
+    }
+
+    /// On a listening socket (made before the workers were forked: shared
+    /// is set, and each connection wakes one worker).
+    pub fn on(listener: sys::fd, shared: bool) -> Result<LinuxIo, i32> {
         let ep = sys::Epoll::new()?;
-        ep.add(listener, sys::EPOLLIN | sys::EPOLLET, LISTENER as u64)?;
+        let excl = if shared { sys::EPOLLEXCLUSIVE } else { 0 };
+        ep.add(listener, sys::EPOLLIN | sys::EPOLLET | excl, LISTENER as u64)?;
         Ok(LinuxIo { listener, ep, fds: vec![-1; CONN_MAX], evs: vec![sys::epoll_event { events: 0, data: 0 }; EVENTS_MAX] })
     }
 }
