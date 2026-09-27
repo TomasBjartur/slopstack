@@ -95,13 +95,15 @@ version, found the two worst bugs in this one within minutes.
 - **The model proof is about sets, so it is easy**; the hard part (the
   efficient code equals the model) is tested, not proved. Proving the run
   structure's in-order walk equal to the model in Verus is future work.
-- **One very long paragraph is slow to type in: the 10x rule fails here.**
-  The editor's view keeps only a window of the text in the textarea, cut
-  at line breaks. A 300 KB paragraph with no line break sits in the
-  textarea whole, and the browser's own work costs 155-192 ms a key
-  (tests/usability_test.py measures it). Our imagined worst paragraph is
-  150 KB, so the 10x case, 1.5 MB, would be worse. The fix is to cut the
-  window inside long lines as well; it is not done yet.
+- **One very long paragraph was slow to type in (fixed).** The editor's
+  view kept a window of the text in the textarea, cut at line breaks
+  only, so a 300 KB paragraph sat in it whole: 155-192 ms a key, 101 ms
+  of it the browser's layout (measured with Chrome's performance
+  metrics; our script was 3 ms). The window now also cuts inside lines
+  longer than 16 KB, at a space: 11-18 ms a key at 300 KB and 14.5 ms at
+  1.5 MB (the 10x case). The cost: such a paragraph shows a break where
+  the window starts or ends. Tested: a budget, and 60 random edits across
+  the cuts leave the page, the view and the document equal.
 - **Real-time is polling** (0.4 s while others type, 1.5 s otherwise),
   not push: simple across worker processes; latency is visible.
 - **Left behind in the conversion from the first version**: comments,

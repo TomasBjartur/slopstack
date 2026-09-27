@@ -709,10 +709,43 @@ def long_line(br, db, a):
     br.js(f"{B}.view.select(150000, 150000, true)")
     time.sleep(0.3)
     med, worst = br.per_key("abc")
-    # A known limit (docs/FINDINGS.md in the old app): the window is cut at
-    # line breaks only, and the browser lays a paragraph out whole.
-    print(f"  (a 300 KB paragraph without line breaks: {med:.0f} ms a key)")
+    # The window cuts inside a line this long (web/view.js LONG): typing is
+    # as fast as anywhere (it was 155-192 ms a key when the window held the
+    # whole paragraph).
+    check(f"a 300 KB paragraph without line breaks: {med:.0f} ms a key (budget 34)", med < 34, (med, worst))
     check("a 300 KB paragraph without line breaks: typing works", br.full() == line[:150000] + "abc" + line[150000:])
+    check("…the window holds only part of the paragraph", br.js("document.getElementById('editor').value.length") < 120000)
+    # Edits at random places, many of them next to a cut: the page's pieces
+    # (joined by their gaps) are the view's text, which is the document's.
+    import random
+    rng = random.Random(5)
+    # The model in UTF-16 units, as the editor counts positions.
+    units = list(br.full().encode("utf-16-le", "surrogatepass"))
+    u16 = lambda t: list(t.encode("utf-16-le"))
+    for k in range(60):
+        n = len(units) // 2
+        pos = rng.randrange(0, n + 1)
+        low = lambda i: 0xDC00 <= units[2 * i] | (units[2 * i + 1] << 8) <= 0xDFFF
+        if 0 < pos < n and low(pos):
+            pos -= 1  # (not between the halves of a character)
+        br.js(f"{B}.view.select({pos}, {pos}, true)")
+        if rng.random() < 0.3 and pos > 0:
+            br.ws.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8})
+            br.ws.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8})
+            w = 2 if pos >= 2 and low(pos - 1) else 1
+            del units[2 * (pos - w):2 * pos]
+        else:
+            ins = rng.choice(["x", "yz ", "\n", " ", "🌊"])
+            br.ws.call("Input.insertText", {"text": ins})
+            units[2 * pos:2 * pos] = u16(ins)
+    text = bytes(units).decode("utf-16-le")
+    time.sleep(0.5)
+    pieces = br.js(f"""(() => {{ const v = {B}.view; return v.pieces.map(pc => (pc.win ? v.ta.value : pc.el.textContent) + (pc.gap ? "\\n" : "")).join(""); }})()""")
+    # (full() reads the text in chunks, which can split a surrogate pair:
+    # joined again here.)
+    whole = (br.full() or "").encode("utf-16", "surrogatepass").decode("utf-16")
+    check("60 edits across the paragraph: the pieces, the view and the document agree",
+          pieces == whole == text and br.js(f"{B}.doc().text()") == text, (len(pieces or ""), len(whole), len(text)))
 
 
 def main():

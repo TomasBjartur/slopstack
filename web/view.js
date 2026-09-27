@@ -15,6 +15,13 @@
 //     textarea (window)  lines [s2, e2)        "\n" between pieces, implied
 //     div.seg (static)   ...                    by the block boundary
 //
+// A line longer than LONG (one huge paragraph) is cut too, at a space: the
+// pieces either side of such a cut have no "\n" between them (gap 0). The
+// textarea's own layout costs ~0.3 ms a key per KB of one line (measured:
+// 101 ms of layout a key in a 300 KB paragraph), so the window must not
+// hold a whole long line. The cost: the paragraph shows a break where it
+// is cut (the textarea is a block of its own).
+//
 // The window moves with the selection: before it gets within EDGE of the
 // window's edge (and at once for keys at the very edge), and when a click
 // or a drag in static text selects there. Moving re-cuts only the pieces
@@ -29,6 +36,8 @@ const MARGIN = 32768;   // the window reaches this far past the selection
 const EDGE = 12288;     // recentred when the selection comes this close to an edge
 const WIDE = 4 * MARGIN; // a window grown past this (a paste) is cut back
 const NEAR = 2;         // pieces on each side of the window always laid out
+const LONG = 16384;     // lines longer than this are cut inside (at a space)
+const NEAR_SPACE = 1024; // how far a cut looks for a space
 
 export class View {
   // hooks.edit(p, del, ins, delText): the textarea changed the text (typing,
@@ -84,7 +93,7 @@ export class View {
     for (let i = 0; i < this.pieces.length; i++) {
       const pc = this.pieces[i];
       if (pc.win) return { i, s, e: s + pc.len };
-      s += pc.len + 1;
+      s += pc.len + pc.gap;
     }
     throw new Error("view: no window");
   }
@@ -98,6 +107,34 @@ export class View {
     return n < 0 ? this.text.length : n;
   }
 
+  // Where a window may start near p: its line's start, or inside a long
+  // line, at a space near p (never inside a surrogate pair).
+  softStart(p) {
+    const ls = this.lineStart(p);
+    if (p - ls <= LONG) return ls;
+    const sp = this.text.lastIndexOf(" ", p);
+    let q = sp >= ls && sp >= p - NEAR_SPACE ? sp + 1 : p;
+    if (q > ls && isLow(this.text.charCodeAt(q))) q--;
+    return q;
+  }
+
+  // Where a window may end near p: its line's end, or inside a long line,
+  // at a space near p.
+  softEnd(p) {
+    const le = this.lineEnd(p);
+    if (le - p <= LONG) return le;
+    const sp = this.text.indexOf(" ", p);
+    let q = sp >= 0 && sp < le && sp <= p + NEAR_SPACE ? sp : p;
+    if (q < le && isLow(this.text.charCodeAt(q))) q--;
+    return q;
+  }
+
+  // The gap after a piece ending at e: 1 if a "\n" is there, else 0 (a cut
+  // inside a line, or the end of the text).
+  gapAt(e) {
+    return e < this.text.length && this.text.charCodeAt(e) === 10 ? 1 : 0;
+  }
+
   // The selection in the whole text: {a, b, back} (back: the caret at a).
   sel() {
     const w = this.win();
@@ -106,8 +143,9 @@ export class View {
   }
 
   // BUILDING
-  // Static pieces for the lines [s, e) (s a line start, e a line end).
-  cut(s, e) {
+  // Static pieces for the text [s, e), cut at line ends (gap 1); the last
+  // piece's gap is last (what separates e from what follows).
+  cut(s, e, last) {
     const out = [];
     if (s > e) return out;
     let p = s;
@@ -119,30 +157,38 @@ export class View {
         q = back >= p && back < e ? back : this.text.indexOf("\n", p + SEG);
         if (q < 0 || q > e) q = e;
       }
-      out.push(this.piece(this.text.slice(p, q)));
+      out.push(this.piece(this.text.slice(p, q), q >= e ? last : 1));
       if (q >= e) break;
       p = q + 1;
     }
     return out;
   }
 
-  piece(t) {
+  // Static pieces for [s, w) before a window starting at w (a line start:
+  // the "\n" before it is the gap; else a cut inside a line).
+  before(s, w) {
+    if (w <= s) return [];
+    return this.text.charCodeAt(w - 1) === 10 ? this.cut(s, w - 1, 1) : this.cut(s, w, 0);
+  }
+
+  piece(t, gap) {
     const el = document.createElement("div");
     el.className = "seg";
     el.textContent = t;
-    return { el, len: t.length, win: false };
+    return { el, len: t.length, win: false, gap };
   }
 
   // Everything again, the window around [a, b].
   build(a, b) {
     const n = this.text.length;
-    const ws = this.lineStart(Math.max(0, Math.min(a, b) - MARGIN));
-    const we = this.lineEnd(Math.min(n, Math.max(a, b) + MARGIN));
-    const before = ws > 0 ? this.cut(0, ws - 1) : [];
-    const after = we < n ? this.cut(we + 1, n) : [];
+    const ws = this.softStart(Math.max(0, Math.min(a, b) - MARGIN));
+    const we = Math.max(ws, this.softEnd(Math.min(n, Math.max(a, b) + MARGIN)));
+    const gap = this.gapAt(we);
+    const before = this.before(0, ws);
+    const after = we < n ? this.cut(we + gap, n, 0) : [];
     for (const pc of this.pieces) if (!pc.win) pc.el.remove();
     this.place(before, after);
-    this.pieces = [...before, { el: this.ta, len: we - ws, win: true }, ...after];
+    this.pieces = [...before, { el: this.ta, len: we - ws, win: true, gap }, ...after];
     this.setWindow(this.text.slice(ws, we));
     this.near(false);
   }
@@ -190,7 +236,7 @@ export class View {
   // The pieces overlapping [lo, hi] (with the lines next to it) and the
   // window: indexes [i, j] and the text they span, [rs, re].
   span(lo, hi, withWindow = true) {
-    let s = 0, i = -1, j = -1, rs = 0, re = 0;
+    let s = 0, i = -1, j = -1, rs = 0, re = 0, gap = 0;
     for (let k = 0; k < this.pieces.length; k++) {
       const pc = this.pieces[k];
       const e = s + pc.len;
@@ -201,24 +247,27 @@ export class View {
         }
         j = k;
         re = e;
+        gap = pc.gap;
       }
-      s = e + 1;
+      s = e + pc.gap;
     }
-    return { i, j, rs, re };
+    return { i, j, rs, re, gap };
   }
 
   // Replaces the pieces [i, j], spanning [rs, re] of the text as it is now,
   // with new ones: the window on the lines around [a, b], static text
   // either side. Answers the window's start.
-  recut({ i, j, rs, re }, a, b) {
+  recut({ i, j, rs, re, gap: last }, a, b) {
     const n = this.text.length;
-    const ws = Math.max(rs, this.lineStart(Math.max(0, Math.min(a, b) - MARGIN)));
-    const we = Math.max(ws, Math.min(re, this.lineEnd(Math.min(n, Math.max(a, b) + MARGIN))));
-    const pre = ws > rs ? this.cut(rs, ws - 1) : [];
-    const post = we < re ? this.cut(we + 1, re) : [];
+    const ws = Math.max(rs, this.softStart(Math.max(0, Math.min(a, b) - MARGIN)));
+    const we = Math.max(ws, Math.min(re, this.softEnd(Math.min(n, Math.max(a, b) + MARGIN))));
+    // The window's gap: the region's own at its end, else what is at we.
+    const gap = we >= re ? last : this.gapAt(we);
+    const pre = this.before(rs, ws);
+    const post = we < re ? this.cut(we + gap, re, last) : [];
     for (const pc of this.pieces.slice(i, j + 1)) if (!pc.win) pc.el.remove();
     this.place(pre, post);
-    this.pieces.splice(i, j - i + 1, ...pre, { el: this.ta, len: we - ws, win: true }, ...post);
+    this.pieces.splice(i, j - i + 1, ...pre, { el: this.ta, len: we - ws, win: true, gap }, ...post);
     this.setWindow(this.text.slice(ws, we));
     this.near();
     return ws;
@@ -245,7 +294,7 @@ export class View {
     if (hi + 2 * MARGIN >= w.s && lo - 2 * MARGIN <= w.e) return this.recut(this.span(lo, hi), a, b);
     const focused = document.activeElement === this.ta;
     // The window's text, static in its place.
-    const frozen = this.cut(w.s, w.e);
+    const frozen = this.cut(w.s, w.e, this.pieces[w.i].gap);
     const frag = document.createDocumentFragment();
     for (const pc of frozen) frag.appendChild(pc.el);
     this.box.insertBefore(frag, this.ta);
@@ -255,7 +304,8 @@ export class View {
     // The textarea to the target's pieces, which are then re-cut around it.
     const sp = this.span(lo, hi, false);
     this.box.insertBefore(this.ta, this.pieces[sp.i].el);
-    this.pieces.splice(sp.i, 0, { el: this.ta, len: 0, win: true });
+    // (An empty window before piece sp.i: no gap, the piece follows it.)
+    this.pieces.splice(sp.i, 0, { el: this.ta, len: 0, win: true, gap: 0 });
     sp.j++;
     const ws = this.recut(sp, a, b);
     if (focused) this.focus();
@@ -390,7 +440,7 @@ export class View {
         pc.el.textContent = this.text.slice(st, st + pc.len);
         return;
       }
-      st = e + 1;
+      st = e + pc.gap;
     }
     // Across pieces: re-cut them, the window where the selection now is.
     const a = map(s.back ? s.b : s.a), b = map(s.back ? s.a : s.b);
@@ -427,7 +477,7 @@ export class View {
         // Offsets within the piece's text node (the ::after is not text).
         return s + Math.min(off, pc.len);
       }
-      s += pc.len + 1;
+      s += pc.len + pc.gap;
     }
     return -1;
   }
@@ -479,7 +529,7 @@ export class View {
         const rs = r.getClientRects();
         return rs.length && rs[rs.length - 1].height > 0 ? rs[rs.length - 1].top : null;
       }
-      s = e + 1;
+      s = e + pc.gap;
     }
     return null;
   }
