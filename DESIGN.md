@@ -60,12 +60,17 @@ none is planned.
 ## Shape of the server
 
 - **Processes**: a supervisor opens the listening socket and forks
-  `WORKERS` processes; each runs one event loop (epoll, edge-triggered,
-  fixed pools sized at start). Shared counters (cache generations) live in
-  one `MAP_SHARED` page.
-- **Helper threads** in each worker for work whose cost depends on the
-  data: search, making a post's text, rendering. The loop hands work over
-  and never blocks; a query past its deadline stops.
+  `BLOG_WORKERS` processes; each runs one event loop (epoll, edge-triggered,
+  fixed pools sized at start). They share only the database: every cache
+  is keyed by what the database says (a post's update time, a feed
+  generation bumped by triggers, the last stored batch of a document).
+  (Planned and not built: a shared-memory page for counters, which the
+  database's generations made unnecessary.)
+- **Work on the loop**: every request's work runs on its worker's loop,
+  bounded by the limits and a query deadline; rendering a novel (about
+  200 ms, then cached) is the longest. (Planned and not built: helper
+  threads for data-sized work. Other workers keep serving meanwhile; if
+  one worker's pauses matter, this is the next step.)
 - **All I/O behind a trait** (`Io`: accept, read, write, close, timers,
   clock, randomness, the database). Production implements it with
   syscalls; the **simulator** implements it with a seeded model of the
@@ -145,6 +150,34 @@ behaves like an app:
 
 Every guarantee is labelled "proved about the code", "proved about a
 model", or "tested (how)".
+
+## Principles learned in the building
+
+- **The 10x rule counts the browser's work too.** No cost per keystroke may
+  grow with the document, ours or the browser's: a textarea lays its text
+  out as one unit, an IntersectionObserver checks every target it has,
+  `content-visibility: auto` watches every element that has it. Three of
+  the novel-length slowdowns were browser work we had triggered.
+- **Every cache names its key, and the key comes from the database**: an
+  id that is never reused, or a version the database issues (updated_ms,
+  the feed generation, a batch's seq). A key the database can reuse leaked
+  one post's text into another's.
+- **Stored time is wall-clock; timeouts are monotonic** (`Io::wall_ms`,
+  `Io::now_ms`). Mixing them gave dates in 1970 and sessions that did not
+  expire.
+- **Pinned dependencies get tests of the behaviour we rely on.** Datastar
+  1.0.4 sends no second request to a URL from the same element, and leaves
+  an indicator set when an answer replaces the form that sent it; both are
+  now tested, so an upgrade or a wrong belief fails loudly.
+- **Usability rules are tested rules**: no dead ends (every error offers the
+  next step: logged out while writing, "Log in"); after logging in, back
+  where you were; every format turns off the way it turned on; a
+  preference set is kept.
+- *Tentative*: **keep the JavaScript on the proved path small.** The
+  renderer and the CRDT are Rust (proved, or checked against a proved
+  model) in the browser as WebAssembly; the editor's own JavaScript
+  (Visual mode, Vim, paste, the view) is only tested, and growing. Before
+  more logic goes there, ask whether it belongs in the WebAssembly.
 
 ## Limits and the 10x rule
 

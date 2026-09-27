@@ -45,6 +45,34 @@ CPU throttled. Sizes nobody tested are where the first version broke.
   browser must own the work, the platform for navigation (speculation
   rules, view transitions, bfcache). No framework, no client router.
 
+## Habits (each from a bug or a lost hour here)
+
+- **Test the second time, not just the first.** Every action on and off,
+  twice, and after a reload with the saved preferences. (Datastar sent no
+  second request to a URL; reopening in Visual mode broke it; formats
+  could be turned on but not off. Twenty suites passed over all three.)
+- **A check copied into the browser gets the server's attacks.** Any
+  validation in page JavaScript is tested with the same hostile inputs as
+  the server's, or removed so the server alone decides. (The open redirect
+  was in the page's copy of a check the server did right.)
+- **Measure in a used state.** Budgets are checked after a realistic
+  sequence of actions, on at least 10 samples, reporting the median and
+  the worst. (A fresh page: Vim x 30 ms; after the test's earlier steps:
+  65 ms. Four-key samples misled.)
+- **Name the unit of every position** (UTF-16 units, characters, bytes)
+  in its name or comment. (A test model counting characters drifted after
+  the first emoji.)
+- **When a test fails, prove whose bug it is first**: reduce it to a
+  minimal case, and say "test bug" or "app bug" in the commit. (Several
+  failures here were the harness: a const declared twice, a DOM element
+  that does not serialize, a stale server on the port.)
+- **Deploying**: back up, convert if needed, install, then check the live
+  site in a real browser (a temporary session, deleted after) and write
+  down the way back (`deploy/README.md`). Ask before each deploy.
+- *Tentative*: a usability pass (driving the real browser as a person
+  would, with screenshots) after each larger feature. It found more real
+  bugs than the ported suites; it is slow, so perhaps at milestones.
+
 ## Toolchains (pinned)
 
 - Rust 1.98.1 (`rustup default 1.98.1`); linker `~/opt/rustlink/cc.sh`
