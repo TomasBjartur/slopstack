@@ -414,3 +414,58 @@ fn perf(check: &mut dyn FnMut(&str, bool)) {
     let g = times[1] / times[0];
     check(&format!("replaying a history: 20k ops {:.1} ms, 200k {:.1} ms ({g:.1}x for 10x)", times[0] * 1000.0, times[1] * 1000.0), g < 25.0);
 }
+
+/// A case for the Lean model (tests/crdt_lean.sh): a random history on
+/// three replicas, fully synced; prints its operations, one a line
+/// ("i rep ctr prep pctr side c,c,..." or "d rep ctr len"), then "=" and
+/// the text Rust made, as code points.
+pub fn lean_case(seed: u64) {
+    let mut rng = Rng(seed.wrapping_mul(2_654_435_761) | 1);
+    let n = 3;
+    let mut docs: Vec<Doc> = (0..n).map(|_| Doc::new()).collect();
+    let mut log: Vec<(usize, Vec<u8>)> = vec![];
+    let mut seen = vec![0usize; n];
+    for _ in 0..40 + rng.below(80) {
+        let x = rng.below(n as u64) as usize;
+        if rng.chance(0.3) {
+            // Catch up on everyone else's operations (in log order).
+            for (src, b) in &log[seen[x]..] {
+                if *src != x {
+                    docs[x].apply_batch(b, &mut ()).expect("applies");
+                }
+            }
+            seen[x] = log.len();
+            continue;
+        }
+        let len = docs[x].len16();
+        let pos = rng.below(len + 1);
+        let del = if len > pos && rng.chance(0.4) { 1 + rng.below((len - pos).min(6)) } else { 0 };
+        let ins = if del == 0 || rng.chance(0.5) { random_text(&mut rng) } else { String::new() };
+        let mut out = vec![];
+        if docs[x].edit(x as u32 + 2, pos, del, &ins, &mut out).is_ok() && !out.is_empty() {
+            // (Own operations count as seen only if nothing came between.)
+            if seen[x] == log.len() {
+                seen[x] += 1;
+            }
+            log.push((x, out));
+        }
+    }
+    let mut all = Doc::new();
+    for (_, b) in &log {
+        all.apply_batch(b, &mut ()).expect("applies");
+        let mut i = 0;
+        while i < b.len() {
+            let (op, next) = crdt::decode(b, i).unwrap();
+            match op {
+                Op::Ins { rep, ctr, parent, side, text } => {
+                    let cs: Vec<String> = text.chars().map(|c| (c as u32).to_string()).collect();
+                    println!("i {rep} {ctr} {} {} {side} {}", parent >> 32, parent as u32, cs.join(","));
+                }
+                Op::Del { rep, ctr, len } => println!("d {rep} {ctr} {len}"),
+            }
+            i = next;
+        }
+    }
+    let t: Vec<String> = all.text().chars().map(|c| (c as u32).to_string()).collect();
+    println!("= {}", t.join(" "));
+}

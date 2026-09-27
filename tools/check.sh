@@ -9,10 +9,14 @@ mkdir -p build
 tools/build_c.sh
 echo "== proofs (Verus)"
 "$VERUS" src/main.rs
+echo "== proofs (Lean, about the CRDT's model)"
+( cd lean && "$HOME/.elan/bin/lean" Fugue.lean )
 echo "== build"
 "$VERUS" src/main.rs --no-verify --compile $LINK -C opt-level=3 -o build/server
 echo "== tests"
-for t in crypto db http markdown sim; do
+for t in crdt crypto db http markdown sim; do
   echo "-- $t"
   build/server test $t | tail -4
 done
+echo "== the CRDT against the Lean model"
+tests/crdt_lean.sh 50 | tail -1

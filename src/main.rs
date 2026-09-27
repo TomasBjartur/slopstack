@@ -55,6 +55,7 @@ fn run() {
     if args.len() >= 3 && args[1] == "test" {
         match args[2].as_str() {
             "crdt" => tests::crdt::run(),
+            "crdt-lean" => tests::crdt::lean_case(args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1)),
             "crypto" => tests::crypto::run(),
             "db" => tests::db::run(),
             "http" => tests::http::run(),
