@@ -14,7 +14,10 @@ pub const ASSETS: &[Asset] = &[
     Asset { name: "app.css", ctype: "text/css; charset=utf-8", bytes: include_bytes!("../web/app.css") },
     Asset { name: "app.js", ctype: "text/javascript; charset=utf-8", bytes: include_bytes!("../web/app.js") },
     Asset { name: "passkey.js", ctype: "text/javascript; charset=utf-8", bytes: include_bytes!("../web/passkey.js") },
-    Asset { name: "editor.js", ctype: "text/javascript; charset=utf-8", bytes: include_bytes!("../web/editor.js") },
+    // The editor: web/*.js bundled by tools/bundle.py, and the WebAssembly
+    // it runs (tools/build_wasm.sh).
+    Asset { name: "editor.js", ctype: "text/javascript; charset=utf-8", bytes: include_bytes!("../build/editor.js") },
+    Asset { name: "app.wasm", ctype: "application/wasm", bytes: include_bytes!("../build/app.wasm") },
     // vendor/datastar/README.md: version, hash, why.
     Asset { name: "datastar.js", ctype: "text/javascript; charset=utf-8", bytes: include_bytes!("../vendor/datastar/datastar.js") },
 ];

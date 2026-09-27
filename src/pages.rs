@@ -10,11 +10,13 @@ use crate::html::{escape, Markup};
 pub struct H {
     pub b: Vec<u8>,
     pub nonce: String,
+    /// The page runs WebAssembly (the editor): its CSP allows compiling it.
+    pub wasm: bool,
 }
 
 impl H {
     pub fn new(nonce: String) -> H {
-        H { b: Vec::with_capacity(16 * 1024), nonce }
+        H { b: Vec::with_capacity(16 * 1024), nonce, wasm: false }
     }
     /// Template text.
     pub fn r(&mut self, s: &'static str) -> &mut H {
@@ -396,6 +398,7 @@ pub struct EditView<'a> {
 }
 
 pub fn edit(h: &mut H, v: &EditView) {
+    h.wasm = true;
     head(h, &format!("Editing: {}", v.title));
     h.r("<header class=\"editor-bar\"><div class=\"wrap wide\"><a class=\"btn quiet\" href=\"/dash/").t(v.blog_slug).r("\" aria-label=\"Back to the blog\">←</a><span id=\"sync-status\" class=\"status\" role=\"status\">Saved</span>");
     if v.published {
@@ -403,7 +406,9 @@ pub fn edit(h: &mut H, v: &EditView) {
     } else {
         h.r("<button form=\"post-form\" name=\"action\" value=\"save\">Save draft</button><button form=\"post-form\" name=\"action\" value=\"publish\" class=\"primary\">Publish</button>");
     }
-    h.r("</div></header><main id=\"main\"><form id=\"post-form\" method=\"post\" action=\"/edit/").n(v.id).r("\" class=\"wrap write editor\"><textarea class=\"title\" name=\"title\" rows=\"1\" required maxlength=\"200\" placeholder=\"Title\" aria-label=\"Title\">&#10;").t(v.title).r("</textarea><div class=\"edit-tools\" id=\"edit-tools\"></div><textarea id=\"editor\" class=\"text\" ").r(if v.big { "readonly data-big=\"1\" " } else { "name=\"body\" " }).r("placeholder=\"Tell your story…\" aria-label=\"Text\" data-published=\"").r(if v.published { "1" } else { "0" }).r("\" data-post=\"").n(v.id).r("\" data-rep=\"").n(v.rep as u64).r("\">&#10;").t(v.body).r("</textarea><p class=\"help\">Markdown (CommonMark): <code>## Heading</code> <code>**bold**</code> <code>*italic*</code> <code>[link](https://…)</code> <code>- list</code> <code>&gt; quote</code>. Your text syncs as you type; Ctrl+S or ⌘S saves.</p></form><div class=\"wrap danger-zone\"><form method=\"post\" action=\"/edit/").n(v.id).r("/delete\" data-confirm=\"Delete this post? This cannot be undone.\"><button class=\"danger\">Delete post</button></form></div></main><script type=\"module\" src=\"");
+    h.r("</div></header><main id=\"main\"><form id=\"post-form\" method=\"post\" action=\"/edit/").n(v.id).r("\" class=\"wrap write editor\"><textarea class=\"title\" name=\"title\" rows=\"1\" required maxlength=\"200\" placeholder=\"Title\" aria-label=\"Title\">&#10;").t(v.title).r("</textarea><div class=\"edit-tools\" id=\"edit-tools\"></div><textarea id=\"editor\" class=\"text\" ").r(if v.big { "readonly data-big=\"1\" " } else { "name=\"body\" " }).r("placeholder=\"Tell your story…\" aria-label=\"Text\" data-published=\"").r(if v.published { "1" } else { "0" }).r("\" data-post=\"").n(v.id).r("\" data-rep=\"").n(v.rep as u64).r("\" data-wasm=\"");
+    asset(h, "app.wasm");
+    h.r("\">&#10;").t(v.body).r("</textarea><p class=\"help\">Markdown (CommonMark): <code>## Heading</code> <code>**bold**</code> <code>*italic*</code> <code>[link](https://…)</code> <code>- list</code> <code>&gt; quote</code>. Your text syncs as you type; Ctrl+S or ⌘S saves.</p></form><div class=\"wrap danger-zone\"><form method=\"post\" action=\"/edit/").n(v.id).r("/delete\" data-confirm=\"Delete this post? This cannot be undone.\"><button class=\"danger\">Delete post</button></form></div></main><script type=\"module\" src=\"");
     asset(h, "editor.js");
     h.r("\"></script></body></html>\n");
 }

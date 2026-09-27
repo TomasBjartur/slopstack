@@ -181,7 +181,8 @@ impl Site {
         let mut h = H::new(nonce);
         f(&mut h);
         let cache = if r.signed_in() || code != 200 { Cache::NoStore } else { Cache::Revalidate };
-        resp::whole(out, code, "text/html; charset=utf-8", cache, Some(&h.nonce), b"", &h.b, !r.head_only);
+        resp::head_wasm(out, code, "text/html; charset=utf-8", cache, Some(&h.nonce), h.wasm);
+        resp::body(out, &h.b, !r.head_only);
     }
 
     fn error_page(&self, r: &mut R, out: &mut Vec<u8>, code: u16) {

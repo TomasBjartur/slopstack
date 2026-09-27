@@ -38,6 +38,12 @@ fn reason(code: u16) -> &'static str {
 
 /// A response head up to (not including) its length and the blank line.
 pub fn head(out: &mut Vec<u8>, code: u16, ctype: &str, cache: Cache, nonce: Option<&str>) {
+    head_wasm(out, code, ctype, cache, nonce, false)
+}
+
+/// As head; wasm: the page may compile WebAssembly (the editor's:
+/// 'wasm-unsafe-eval' allows that and nothing else, not eval).
+pub fn head_wasm(out: &mut Vec<u8>, code: u16, ctype: &str, cache: Cache, nonce: Option<&str>, wasm: bool) {
     let mut n = [0u8; 20];
     out.extend_from_slice(b"HTTP/1.1 ");
     out.extend_from_slice(itoa(code as u64, &mut n));
@@ -50,6 +56,9 @@ pub fn head(out: &mut Vec<u8>, code: u16, ctype: &str, cache: Cache, nonce: Opti
         Some(nc) => {
             out.extend_from_slice(b"Content-Security-Policy: default-src 'none'; script-src 'self' 'nonce-");
             out.extend_from_slice(nc.as_bytes());
+            if wasm {
+                out.extend_from_slice(b"' 'wasm-unsafe-eval");
+            }
             out.extend_from_slice(b"'; style-src 'self'; img-src 'self' https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\n");
         }
         None => out.extend_from_slice(CSP.as_bytes()),
