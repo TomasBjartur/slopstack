@@ -88,9 +88,12 @@ pub const MIGRATIONS: &[&str] = &[
        words INTEGER NOT NULL DEFAULT 0,
        -- The published text (Markdown), as of the last publish or update.
        body_md TEXT NOT NULL DEFAULT '',
-       -- INTERIM (until the collaborative document, doc_ops): the draft.
-       draft_md TEXT NOT NULL DEFAULT '',
+       -- The title being edited (the post's title changes with a publish).
        draft_title TEXT NOT NULL DEFAULT '',
+       -- The last change to the text (a sync), and replica numbers given
+       -- out for it (1 is the server's: src/crdt.rs SERVER_REP).
+       edited_ms INTEGER NOT NULL DEFAULT 0,
+       reps INTEGER NOT NULL DEFAULT 1,
        UNIQUE (blog_id, slug)
      ) STRICT;
      CREATE INDEX post_recent ON post(published, published_ms);
@@ -103,6 +106,13 @@ pub const MIGRATIONS: &[&str] = &[
        data BLOB NOT NULL CHECK (length(data) BETWEEN 1 AND 16777216)
      ) STRICT;
      CREATE INDEX doc_ops_post ON doc_ops(post_id, seq);
+     -- Who each replica number (one per editor page load) was given to.
+     CREATE TABLE doc_rep (
+       post_id INTEGER NOT NULL REFERENCES post(id) ON DELETE CASCADE,
+       rep INTEGER NOT NULL CHECK (rep >= 2),
+       user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+       PRIMARY KEY (post_id, rep)
+     ) STRICT, WITHOUT ROWID;
      CREATE TABLE doc_snap (
        post_id INTEGER PRIMARY KEY REFERENCES post(id) ON DELETE CASCADE,
        upto INTEGER NOT NULL,
@@ -191,15 +201,20 @@ queries! {
     Authors => "SELECT u.id, u.name, u.email, m.role FROM member m JOIN user u ON u.id = m.user_id WHERE m.blog_id = ?1 ORDER BY m.role, u.name LIMIT 1000",
     PostNew => "INSERT INTO post(blog_id, slug, title, draft_title, author_id, updated_ms) VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
     SlugTaken => "SELECT 1 FROM post WHERE blog_id = ?1 AND slug = ?2",
-    PostsAdmin => "SELECT id, slug, title, published, updated_ms FROM post WHERE blog_id = ?1 ORDER BY updated_ms DESC LIMIT ?2 OFFSET ?3",
-    EditGet => "SELECT p.title, p.slug, p.published, b.slug, b.id, p.draft_md, p.published_ms IS NULL, p.draft_title FROM post p JOIN blog b ON b.id = p.blog_id WHERE p.id = ?1",
-    DraftSave => "UPDATE post SET draft_title = ?2, title = CASE WHEN published THEN title ELSE ?2 END, draft_md = ?3, updated_ms = ?4 WHERE id = ?1",
-    PostPublish => "UPDATE post SET title = ?2, draft_title = ?2, draft_md = ?3, body_md = ?3, words = ?4, published = 1, published_ms = coalesce(published_ms, ?5), updated_ms = ?5, slug = ?6 WHERE id = ?1",
+    PostsAdmin => "SELECT id, slug, draft_title, published, max(updated_ms, edited_ms) FROM post WHERE blog_id = ?1 ORDER BY updated_ms DESC LIMIT ?2 OFFSET ?3",
+    EditGet => "SELECT p.title, p.slug, p.published, b.slug, b.id, '', p.published_ms IS NULL, p.draft_title FROM post p JOIN blog b ON b.id = p.blog_id WHERE p.id = ?1",
+    DraftSave => "UPDATE post SET draft_title = ?2, title = CASE WHEN published THEN title ELSE ?2 END, updated_ms = ?3 WHERE id = ?1",
+    PostPublish => "UPDATE post SET title = ?2, draft_title = ?2, body_md = ?3, words = ?4, published = 1, published_ms = coalesce(published_ms, ?5), updated_ms = ?5, slug = ?6 WHERE id = ?1",
+    Edited => "UPDATE post SET edited_ms = ?2 WHERE id = ?1",
+    RepNew => "UPDATE post SET reps = reps + 1 WHERE id = ?1 RETURNING reps",
+    RepAdd => "INSERT INTO doc_rep(post_id, rep, user_id) VALUES (?1, ?2, ?3)",
+    RepOwner => "SELECT user_id FROM doc_rep WHERE post_id = ?1 AND rep = ?2",
+    SnapUpto => "SELECT upto, size FROM doc_snap WHERE post_id = ?1",
     PostUnpublish => "UPDATE post SET published = 0, updated_ms = ?2 WHERE id = ?1",
     PostDel => "DELETE FROM post WHERE id = ?1",
     BlogPosts => "SELECT p.slug, p.title, p.published_ms, b.slug, b.title, coalesce(u.name, ''), coalesce(u.id, 0), p.words, coalesce(u.handle, '') FROM post p JOIN blog b ON b.id = p.blog_id LEFT JOIN user u ON u.id = p.author_id WHERE p.blog_id = ?1 AND p.published = 1 ORDER BY p.published_ms DESC LIMIT ?2 OFFSET ?3",
     PostPage => "SELECT p.id, p.title, p.published_ms, coalesce(u.name, ''), coalesce(u.handle, ''), p.words, p.published, p.updated_ms FROM post p LEFT JOIN user u ON u.id = p.author_id WHERE p.blog_id = ?1 AND p.slug = ?2",
-    PostBody => "SELECT CASE WHEN published THEN body_md ELSE draft_md END FROM post WHERE id = ?1",
+    PostBody => "SELECT body_md FROM post WHERE id = ?1",
     AuthorPosts => "SELECT p.slug, p.title, p.published_ms, b.slug, b.title, coalesce(u.name, ''), coalesce(u.id, 0), p.words, coalesce(u.handle, '') FROM post p JOIN blog b ON b.id = p.blog_id LEFT JOIN user u ON u.id = p.author_id WHERE p.author_id = ?1 AND p.published = 1 ORDER BY p.published_ms DESC LIMIT ?2 OFFSET ?3",
     Recent => "SELECT p.slug, p.title, p.published_ms, b.slug, b.title, coalesce(u.name, ''), coalesce(u.id, 0), p.words, coalesce(u.handle, '') FROM post p JOIN blog b ON b.id = p.blog_id LEFT JOIN user u ON u.id = p.author_id WHERE p.published = 1 ORDER BY p.published_ms DESC LIMIT ?1 OFFSET ?2",
     OpsSince => "SELECT seq, data FROM doc_ops WHERE post_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
@@ -231,6 +246,8 @@ pub enum No {
     Conflict,
     /// The write budget for this minute is spent.
     Budget,
+    /// The request was malformed (a bad batch of operations).
+    Bad,
     /// The database failed.
     Error,
 }

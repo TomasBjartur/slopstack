@@ -33,6 +33,7 @@ pub mod app;
 pub mod assets;
 pub mod pages;
 pub mod site;
+pub mod docs;
 pub mod sim;
 pub mod tests {
     pub mod crdt;

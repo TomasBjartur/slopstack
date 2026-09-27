@@ -527,6 +527,44 @@ impl Doc {
 
     // OPERATIONS
     /// Checks an operation against this document without changing it.
+    /// Whether an insert is already here exactly (the same elements: ids,
+    /// parents, sides, characters): applying it again changes nothing, as
+    /// in the model, where the state is a set. Err if some of its ids are
+    /// here with anything else.
+    fn repeat(&self, rep: u32, ctr: u32, parent: u64, side: u8, text: &str) -> Result<bool, Bad> {
+        let n = text.chars().count() as u32;
+        let (a, z) = (key(rep, ctr), key(rep, ctr + n - 1));
+        if self.find(a).is_none() && self.index.range(a..=z).next().is_none() {
+            return Ok(false);
+        }
+        let mut chars = text.char_indices().map(|(i, _)| i).chain(std::iter::once(text.len()));
+        let mut at = chars.next().expect("a character");
+        let mut k = ctr;
+        while k < ctr + n {
+            let (r, i) = self.find(key(rep, k)).ok_or(Bad::Id)?;
+            let ru = r as usize;
+            // The element's parent: the run's, at its start; else the one before.
+            let (p, sd) = if i == 0 { (key(self.prep[ru], self.pctr[ru]), self.side[ru]) } else { (key(rep, k - 1), RIGHT) };
+            let (wp, ws) = if k == ctr { (parent, side) } else { (key(rep, k - 1), RIGHT) };
+            if p != wp || sd != ws {
+                return Err(Bad::Id);
+            }
+            let take = (self.len[ru] - i).min(ctr + n - k);
+            let o = self.off[ru] as usize;
+            let (b0, b1) = (self.byte_of(r, i) as usize, self.byte_of(r, i + take) as usize);
+            let mut end = at;
+            for _ in 0..take {
+                end = chars.next().expect("counted");
+            }
+            if self.text[o + b0..o + b1] != text.as_bytes()[at..end] {
+                return Err(Bad::Id);
+            }
+            at = end;
+            k += take;
+        }
+        Ok(true)
+    }
+
     fn check(&self, op: &Op) -> Result<(), Bad> {
         match *op {
             Op::Ins { rep, ctr, parent, side, text } => {
@@ -534,7 +572,8 @@ impl Doc {
                 if rep == 0 || ctr == 0 || ctr as u64 + n - 1 > u32::MAX as u64 {
                     return Err(Bad::Id);
                 }
-                // No element of the run may exist yet.
+                // No element of the run may exist yet (a repeat is skipped
+                // before this is asked).
                 let (a, z) = (key(rep, ctr), key(rep, ctr + (n - 1) as u32));
                 if self.find(a).is_some() || self.index.range(a..=z).next().is_some() {
                     return Err(Bad::Id);
@@ -563,26 +602,34 @@ impl Doc {
     }
 
     /// Applies one operation (checked first; refused whole if bad).
-    pub fn apply(&mut self, op: &Op, sink: &mut dyn Sink) -> Result<(), Bad> {
-        self.check(op)?;
-        match *op {
-            Op::Ins { rep, ctr, parent, side, text } => self.insert(rep, ctr, parent, side, text, sink),
-            Op::Del { rep, ctr, len } => self.delete(rep, ctr, len, sink),
+    /// Answers whether the text or its tombstones changed (false: a repeat).
+    pub fn apply(&mut self, op: &Op, sink: &mut dyn Sink) -> Result<bool, Bad> {
+        if let Op::Ins { rep, ctr, parent, side, text } = *op {
+            if rep != 0 && ctr != 0 && ctr as u64 + text.chars().count() as u64 - 1 <= u32::MAX as u64 && self.repeat(rep, ctr, parent, side, text)? {
+                return Ok(false);
+            }
         }
-        Ok(())
+        self.check(op)?;
+        Ok(match *op {
+            Op::Ins { rep, ctr, parent, side, text } => {
+                self.insert(rep, ctr, parent, side, text, sink);
+                true
+            }
+            Op::Del { rep, ctr, len } => self.delete(rep, ctr, len, sink),
+        })
     }
 
     /// Applies a batch; stops at the first bad operation (the ones before
     /// it stay applied: a caller that must refuse the batch whole checks it
     /// first with a copy, or, as the server does, applies to its own copy
     /// and stores only good batches).
+    /// Answers how many operations changed something.
     pub fn apply_batch(&mut self, b: &[u8], sink: &mut dyn Sink) -> Result<usize, Bad> {
         let (mut i, mut n) = (0, 0);
         while i < b.len() {
             let (op, next) = decode(b, i)?;
-            self.apply(&op, sink)?;
+            n += self.apply(&op, sink)? as usize;
             i = next;
-            n += 1;
         }
         Ok(n)
     }
@@ -649,7 +696,8 @@ impl Doc {
         sink.change(self.pos_of(t), 0, text);
     }
 
-    fn delete(&mut self, rep: u32, ctr: u32, len: u32, sink: &mut dyn Sink) {
+    fn delete(&mut self, rep: u32, ctr: u32, len: u32, sink: &mut dyn Sink) -> bool {
+        let mut changed = false;
         let (mut c, end) = (ctr as u64, ctr as u64 + len as u64);
         while c < end {
             let r = self.start_at(key(rep, c as u32)).expect("checked");
@@ -666,9 +714,11 @@ impl Doc {
                 self.live -= u;
                 self.chars -= take as u64;
                 sink.change(at, u, "");
+                changed = true;
             }
             c += take as u64;
         }
+        changed
     }
 
     // LOCAL EDITS

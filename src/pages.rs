@@ -391,6 +391,8 @@ pub struct EditView<'a> {
     pub published: bool,
     pub blog_slug: &'a str,
     pub body: &'a str,
+    /// Too long to put in the page: the editor loads it.
+    pub big: bool,
 }
 
 pub fn edit(h: &mut H, v: &EditView) {
@@ -401,7 +403,7 @@ pub fn edit(h: &mut H, v: &EditView) {
     } else {
         h.r("<button form=\"post-form\" name=\"action\" value=\"save\">Save draft</button><button form=\"post-form\" name=\"action\" value=\"publish\" class=\"primary\">Publish</button>");
     }
-    h.r("</div></header><main id=\"main\"><form id=\"post-form\" method=\"post\" action=\"/edit/").n(v.id).r("\" class=\"wrap write editor\"><textarea class=\"title\" name=\"title\" rows=\"1\" required maxlength=\"200\" placeholder=\"Title\" aria-label=\"Title\">&#10;").t(v.title).r("</textarea><div class=\"edit-tools\" id=\"edit-tools\"></div><textarea id=\"editor\" class=\"text\" name=\"body\" placeholder=\"Tell your story…\" aria-label=\"Text\" data-published=\"").r(if v.published { "1" } else { "0" }).r("\" data-post=\"").n(v.id).r("\" data-rep=\"").n(v.rep as u64).r("\">&#10;").t(v.body).r("</textarea><p class=\"help\">Markdown (CommonMark): <code>## Heading</code> <code>**bold**</code> <code>*italic*</code> <code>[link](https://…)</code> <code>- list</code> <code>&gt; quote</code>. Your text syncs as you type; Ctrl+S or ⌘S saves.</p></form><div class=\"wrap danger-zone\"><form method=\"post\" action=\"/edit/").n(v.id).r("/delete\" data-confirm=\"Delete this post? This cannot be undone.\"><button class=\"danger\">Delete post</button></form></div></main><script type=\"module\" src=\"");
+    h.r("</div></header><main id=\"main\"><form id=\"post-form\" method=\"post\" action=\"/edit/").n(v.id).r("\" class=\"wrap write editor\"><textarea class=\"title\" name=\"title\" rows=\"1\" required maxlength=\"200\" placeholder=\"Title\" aria-label=\"Title\">&#10;").t(v.title).r("</textarea><div class=\"edit-tools\" id=\"edit-tools\"></div><textarea id=\"editor\" class=\"text\" ").r(if v.big { "readonly data-big=\"1\" " } else { "name=\"body\" " }).r("placeholder=\"Tell your story…\" aria-label=\"Text\" data-published=\"").r(if v.published { "1" } else { "0" }).r("\" data-post=\"").n(v.id).r("\" data-rep=\"").n(v.rep as u64).r("\">&#10;").t(v.body).r("</textarea><p class=\"help\">Markdown (CommonMark): <code>## Heading</code> <code>**bold**</code> <code>*italic*</code> <code>[link](https://…)</code> <code>- list</code> <code>&gt; quote</code>. Your text syncs as you type; Ctrl+S or ⌘S saves.</p></form><div class=\"wrap danger-zone\"><form method=\"post\" action=\"/edit/").n(v.id).r("/delete\" data-confirm=\"Delete this post? This cannot be undone.\"><button class=\"danger\">Delete post</button></form></div></main><script type=\"module\" src=\"");
     asset(h, "editor.js");
     h.r("\"></script></body></html>\n");
 }

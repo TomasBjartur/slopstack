@@ -175,6 +175,17 @@ fn history(seed: u64, n: usize, steps: usize) -> Vec<String> {
             let _ = m.src;
         }
     }
+    // Everything delivered again (a retry after a lost answer): no change.
+    let t0 = docs[0].text();
+    for m in msgs.iter().flatten() {
+        if docs[0].apply_batch(&m.bytes, &mut ()).is_err() {
+            fails.push(format!("seed {seed}: a repeated batch was refused"));
+            break;
+        }
+    }
+    if docs[0].text() != t0 {
+        fails.push(format!("seed {seed}: a repeated batch changed the text"));
+    }
     let want = naive.text();
     for (y, d) in docs.iter().enumerate() {
         let t = d.text();
@@ -244,9 +255,26 @@ pub fn run() {
         s
     };
     let before = snap(&d);
+    // Repeats: an insert already here, exactly, changes nothing (the
+    // model's state is a set); the same ids with anything else are refused.
+    let mut dup = Doc::new();
+    let mut o = vec![];
+    dup.edit(2, 0, 0, "abc", &mut o).unwrap();
+    dup.edit(2, 1, 0, "XY", &mut o).unwrap();
+    dup.edit(3, 0, 1, "", &mut o).unwrap();
+    let t = dup.text();
+    check("…the exact repeat is recognized", dup.apply(&Op::Ins { rep: 2, ctr: 4, parent: key(2, 2), side: LEFT, text: "XY" }, &mut ()).is_ok());
+    check("a batch applied twice: the same text", dup.apply_batch(&o, &mut ()).is_ok() && dup.apply_batch(&o, &mut ()).is_ok() && dup.text() == t);
+    let before_dup = snap(&dup);
+    for (name, op) in [
+        ("a repeat with another character", Op::Ins { rep: 2, ctr: 1, parent: ROOT, side: RIGHT, text: "Z" }),
+        ("a repeat with another parent", Op::Ins { rep: 2, ctr: 4, parent: key(2, 1), side: RIGHT, text: "XY" }),
+        ("a repeat longer than the original", Op::Ins { rep: 2, ctr: 4, parent: key(2, 2), side: LEFT, text: "XYZ" }),
+    ] {
+        check(&format!("refused: {name}"), dup.apply(&op, &mut ()).is_err() && snap(&dup) == before_dup);
+    }
     let bad: Vec<(&str, Op)> = vec![
-        ("an id already used", Op::Ins { rep: 2, ctr: 1, parent: ROOT, side: RIGHT, text: "z" }),
-        ("an id inside a run", Op::Ins { rep: 2, ctr: 3, parent: ROOT, side: RIGHT, text: "z" }),
+        ("an id inside a run, with another character", Op::Ins { rep: 2, ctr: 3, parent: ROOT, side: RIGHT, text: "z" }),
         ("a counter past 2^32", Op::Ins { rep: 2, ctr: 0xFFFF_FFFF, parent: ROOT, side: RIGHT, text: "zz" }),
         ("rep 0", Op::Ins { rep: 0, ctr: 5, parent: ROOT, side: RIGHT, text: "z" }),
         ("ctr 0", Op::Ins { rep: 9, ctr: 0, parent: ROOT, side: RIGHT, text: "z" }),

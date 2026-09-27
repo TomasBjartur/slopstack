@@ -41,6 +41,9 @@ const PAGE_ITEMS: i64 = 20;
 const PAGES_MAX: u64 = 500;
 /// A post's text (the form's field): 8 MiB (a long novel is ~6 MB).
 const TEXT_MAX: usize = 8 << 20;
+/// Texts longer than this are not put in the edit page (the editor loads
+/// them): 1 MiB.
+const EMBED_MAX: usize = 1 << 20;
 
 pub struct Conf {
     /// What browsers report, e.g. "https://blog.example".
@@ -100,6 +103,7 @@ impl PostCache {
 
 pub struct Site {
     pub st: Store,
+    docs: crate::docs::Docs,
     conf: Conf,
     cache: PostCache,
     /// Login challenges made this minute (CHALLENGES_PER_MINUTE).
@@ -152,6 +156,7 @@ fn no_code(e: No) -> u16 {
         No::Denied => 403,
         No::Conflict => 409,
         No::Budget => 429,
+        No::Bad => 400,
         No::Error => 503,
     }
 }
@@ -167,7 +172,7 @@ type Res = Result<(), u16>;
 
 impl Site {
     pub fn new(st: Store, conf: Conf) -> Site {
-        Site { st, conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, minute: 0, challenges: 0, swept_ms: 0 }
+        Site { st, docs: crate::docs::Docs::new(), conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, minute: 0, challenges: 0, swept_ms: 0 }
     }
 
     // RESPONSES
@@ -242,6 +247,10 @@ impl Site {
             // THE CSRF LAW (proved): no state changes without same-origin.
             if !csrf(r.req.header(b"sec-fetch-site")) {
                 return Err(403);
+            }
+            // The editor's sync: binary, not a form.
+            if let ["edit", id, "sync"] = parts.as_slice() {
+                return self.sync(r, id, out);
             }
             let form = Form::parse(r.req.body).ok_or(400u16)?;
             return self.post(r, &parts, &form, out);
@@ -413,6 +422,11 @@ impl Site {
         let p = self.permit(r, bid, m.id, Action::ReadPost { post: m.id }).map_err(|_| 404u16)?;
         let can_edit = p.facts().role.is_some();
         let body = match self.cache.get(m.id, m.updated_ms) {
+            // A draft (only its authors see it): as it is now, not cached.
+            _ if !m.published => {
+                let doc = self.docs.get(&mut self.st, m.id).map_err(no_code)?;
+                Rc::new(crate::markdown::render(doc.text().as_bytes()))
+            }
             Some(b) => b,
             None => {
                 let mut md = Vec::new();
@@ -901,9 +915,18 @@ impl Site {
         self.st
             .q(Q::EditGet, &[Val::Int(id as i64)], |row| e = Some((row.text(7).to_string(), row.text(1).to_string(), row.int(2) != 0, row.text(3).to_string(), row.text(5).to_string())))
             .map_err(db_code)?;
-        let (title, slug, published, blog_slug, body) = e.ok_or(404u16)?;
-        let rep = u32::from_le_bytes(r.random::<4>());
-        let v = pages::EditView { id, rep, title: &title, slug: &slug, published, blog_slug: &blog_slug, body: &body };
+        let (title, slug, published, blog_slug, _) = e.ok_or(404u16)?;
+        // A replica number for this page's editor: the ids it makes.
+        let uid = r.uid();
+        let rep = self.st.one(Q::RepNew, &[Val::Int(id as i64)]).map_err(db_code)?.ok_or(404u16)?;
+        self.st.run(Q::RepAdd, &[Val::Int(id as i64), Val::Int(rep), Val::Int(uid as i64)]).map_err(db_code)?;
+        // The text in the page (for reading while the editor loads, and the
+        // form without JavaScript), unless it is long: then the editor
+        // loads it, and the form cannot replace it.
+        let text = self.docs.get(&mut self.st, id).map_err(no_code)?.text();
+        let big = text.len() > EMBED_MAX;
+        let body = if big { "" } else { text.as_str() };
+        let v = pages::EditView { id, rep: rep as u32, title: &title, slug: &slug, published, blog_slug: &blog_slug, body, big };
         self.html(r, out, 200, |h| pages::edit(h, &v));
         Ok(())
     }
@@ -911,24 +934,35 @@ impl Site {
     fn save(&mut self, r: &mut R, id: &str, f: &Form, out: &mut Vec<u8>) -> Res {
         let id = Site::post_id(id)?;
         let title = f.text("title", 200, false).ok_or(400u16)?;
-        let body = f.get("body").ok_or(400u16)?;
-        if body.len() > TEXT_MAX || body.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t') {
-            return Err(if body.len() > TEXT_MAX { 413 } else { 400 });
-        }
-        let body = body.replace("\r\n", "\n");
+        // The text: from the editor's document; a form sent without
+        // JavaScript carries it whole (it replaces the document's).
+        let body = match f.get("body") {
+            Some(b) => {
+                if b.len() > TEXT_MAX || b.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t') {
+                    return Err(if b.len() > TEXT_MAX { 413 } else { 400 });
+                }
+                Some(b.replace("\r\n", "\n"))
+            }
+            None => None,
+        };
         let publish = f.get("action") == Some("publish");
         let action = if publish { Action::PublishPost { post: id } } else { Action::EditPost { post: id } };
         let p = self.permit(r, 0, id, action)?;
         let now = r.now();
-        let words = if publish { crate::markdown::words(body.as_bytes()) } else { 0 };
         let blog = p.facts().blog;
+        let docs = &mut self.docs;
         let dest = self
             .st
             .write(&p, now, true, |st, _| {
+                if let Some(b) = &body {
+                    docs.set_text(st, id, b)?;
+                }
                 if !publish {
-                    st.run(Q::DraftSave, &[Val::Int(id as i64), Val::Text(title.as_bytes()), Val::Text(body.as_bytes()), Val::Int(now as i64)])?;
+                    st.run(Q::DraftSave, &[Val::Int(id as i64), Val::Text(title.as_bytes()), Val::Int(now as i64)])?;
                     return Ok(format!("/edit/{id}"));
                 }
+                let body = docs.get(st, id)?.text();
+                let words = crate::markdown::words(body.as_bytes());
                 // The address: fixed at the first publish (links stay).
                 let mut cur = None;
                 st.q(Q::EditGet, &[Val::Int(id as i64)], |row| cur = Some((row.text(1).to_string(), row.text(3).to_string(), row.int(6) != 0)))?;
@@ -960,10 +994,10 @@ impl Site {
     fn publish_draft(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
         let pid = Site::post_id(id)?;
         let mut d = None;
-        self.st.q(Q::EditGet, &[Val::Int(pid as i64)], |row| d = Some((row.text(7).to_string(), row.text(5).to_string()))).map_err(db_code)?;
-        let (title, body) = d.ok_or(404u16)?;
+        self.st.q(Q::EditGet, &[Val::Int(pid as i64)], |row| d = Some(row.text(7).to_string())).map_err(db_code)?;
+        let title = d.ok_or(404u16)?;
         let mut f = Vec::new();
-        for (k, v) in [("title", title.as_str()), ("body", body.as_str()), ("action", "publish")] {
+        for (k, v) in [("title", title.as_str()), ("action", "publish")] {
             if !f.is_empty() {
                 f.push(b'&');
             }
@@ -992,7 +1026,44 @@ impl Site {
         self.st.q(Q::BlogSlug, &[Val::Int(blog as i64)], |row| slug = row.text(0).into()).map_err(db_code)?;
         self.st.write(&p, r.now(), true, |st, _| Ok(st.run(Q::PostDel, &[Val::Int(id as i64)])?)).map_err(no_code)?;
         self.cache.map.remove(&id).map(|(_, m)| self.cache.bytes -= m.len());
+        self.docs.forget(id);
         resp::redirect(out, &format!("/dash/{slug}"), b"");
+        Ok(())
+    }
+
+    // THE EDITOR'S SYNC (local-first: the browser holds the document and
+    // sends its operations; the answer brings everyone else's). Body:
+    // since (u64: the last stored batch the editor has), rep (u32: its
+    // replica number), then operations (src/crdt.rs wire format).
+    fn sync(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
+        let id = Site::post_id(id)?;
+        let b = r.req.body;
+        if b.len() < 12 {
+            return Err(400);
+        }
+        let since = u64::from_le_bytes(b[..8].try_into().expect("8")) as i64;
+        let rep = u32::from_le_bytes(b[8..12].try_into().expect("4"));
+        let ops = &b[12..];
+        let p = self.permit(r, 0, id, Action::EditPost { post: id })?;
+        let (uid, now) = (r.uid(), r.now());
+        if !ops.is_empty() {
+            // The replica number must be one this user was given here.
+            let owner = self.st.one(Q::RepOwner, &[Val::Int(id as i64), Val::Int(rep as i64)]).map_err(db_code)?;
+            if owner != Some(uid as i64) {
+                return Err(403);
+            }
+            let docs = &mut self.docs;
+            self.st
+                .write(&p, now, false, |st, _| {
+                    docs.store(st, id, rep, ops)?;
+                    st.run(Q::Edited, &[Val::Int(id as i64), Val::Int(now as i64)])?;
+                    Ok(())
+                })
+                .map_err(no_code)?;
+        }
+        let mut body = Vec::new();
+        self.docs.reply(&mut self.st, id, since, &mut body).map_err(no_code)?;
+        resp::whole(out, 200, "application/octet-stream", Cache::NoStore, None, b"", &body, true);
         Ok(())
     }
 
