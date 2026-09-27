@@ -13,3 +13,5 @@ echo "== build"
 "$VERUS" tests/http_test.rs --no-verify --compile $LINK -C opt-level=3 -o build/http_test
 echo "== tests"
 build/http_test
+"$VERUS" tests/sim_test.rs --no-verify --compile $LINK -C opt-level=3 -o build/sim_test
+build/sim_test
