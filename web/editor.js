@@ -15,7 +15,7 @@
 // SYNC (POST /edit/<id>/sync, src/site.rs): body = since (u64), rep (u32),
 // operations; answer = kind (1: a snapshot first), seq (u64), more (u8),
 // [snapshot length u32, snapshot], operations.
-import { Doc, ready } from "./crdt.js";
+import { Doc, ready, memoryBytes } from "./crdt.js";
 import { View, diff } from "./view.js";
 import { History } from "./history.js";
 import { setupModes } from "./modes.js";
@@ -65,7 +65,7 @@ function start(ta) {
   const view = new View(ta, { edit: typed });
   view.readOnly = true;
   // For tests and debugging (the whole text is not in the textarea).
-  ta.ed = { view, doc: () => doc, history, loaded: () => loaded, pending: () => batches.length };
+  ta.ed = { view, doc: () => doc, history, loaded: () => loaded, pending: () => batches.length, memory: memoryBytes };
 
   restore();
 

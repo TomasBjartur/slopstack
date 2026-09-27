@@ -18,6 +18,11 @@ export async function ready(url) {
   w = got.instance.exports;
 }
 
+/** Bytes of WebAssembly memory (the document lives there; tests weigh it). */
+export function memoryBytes() {
+  return w ? w.memory.buffer.byteLength : 0;
+}
+
 function put(bytes) {
   const p = w.input(bytes.length); // (may grow memory: take the buffer after)
   new Uint8Array(w.memory.buffer, p, bytes.length).set(bytes);

@@ -173,9 +173,11 @@ def main():
         br.open(f"{E.BASE}/edit/{pid}", loaded=False)
         took = br.wait_loaded()
         check("the post loads", took is not None and br.full() == text, (took, len(br.full() or "")))
+        # The JS heap and the WebAssembly memory (where the document lives).
         heap = br.js("performance.memory.usedJSHeapSize") / 1e6
-        print(f"  loaded in {time.time() - t0:.1f} s; JS heap {heap:.0f} MB")
-        check(f"memory stays moderate (JS heap {heap:.0f} MB for {n / 1e6:.1f}M characters)", heap < 60 + 90 * n / 1e6, heap)
+        wasm = br.js(f"{B}.memory()") / 1e6
+        print(f"  loaded in {time.time() - t0:.1f} s; JS heap {heap:.0f} MB, WebAssembly {wasm:.0f} MB")
+        check(f"memory stays moderate (JS heap {heap:.0f} MB + WebAssembly {wasm:.0f} MB for {n / 1e6:.1f}M characters)", heap + wasm < 60 + 90 * n / 1e6 and wasm > 0, (heap, wasm))
         w = br.win()
         check("the textarea holds only a window", w[1] - w[0] < 150_000 and br.js("document.getElementById('editor').value.length") == w[1] - w[0], w)
         check("the rest is static text", br.js("document.querySelectorAll('.doc .seg').length") > 3)
