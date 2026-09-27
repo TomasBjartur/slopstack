@@ -61,6 +61,10 @@ browser, Caddy.
 | The application stored monotonic time (ms since boot): dates in 1970, expired sessions still valid | the old red-team test, ported | no: the laws are about who, not when. The simulator could not see it (its clock is fake either way) |
 | Deleting a blog left its posts' documents in memory; SQLite reused the post id; a new post by someone else showed the old text | the red-team test | no: authorization was right (the new owner may read their post); the cache was keyed by a reusable id. Fixed at the root: ids are never reused |
 | Statement ids offset by the migration's own statement | the first end-to-end run | — |
+| An open redirect after logging in: the page's check of `?next=` accepted `/\host`, which browsers read as `//host` | the new login test (Chrome), trying hostile destinations | no: the page's JavaScript is not proved; the server's own check already refused it. Both now refuse backslashes |
+| Reopened in Visual mode, every block was read-only ("A long block: edit it in Markdown mode"): the mode opened before the WebAssembly renderer had loaded | using the editor in Chrome (a usability pass) | no |
+| Visual mode flattened nested lists when writing Markdown back (a sub-item's text joined its parent's) | adding Tab to nest list items | no |
+| Datastar 1.0.4 sends no second request to the same URL from the same element (replies, likes, a second co-author did nothing) | the comments test in two Chromes | no |
 | A slowloris could lock readers out of the head buffers; evicting a connection lost its pending output; memory at 100K connections | the simulator | no |
 
 As in the first version: proofs held where aimed (no authorization,
