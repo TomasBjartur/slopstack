@@ -41,6 +41,8 @@ const PAGE_ITEMS: i64 = 20;
 const PAGES_MAX: u64 = 500;
 /// A post's text (the form's field): 8 MiB (a long novel is ~6 MB).
 const TEXT_MAX: usize = 8 << 20;
+/// Editor page loads a user may make a minute (in each worker).
+const OPENS_PER_MINUTE: u32 = 120;
 /// Texts longer than this are not put in the edit page (the editor loads
 /// them): 1 MiB.
 const EMBED_MAX: usize = 1 << 20;
@@ -106,6 +108,8 @@ pub struct Site {
     docs: crate::docs::Docs,
     conf: Conf,
     cache: PostCache,
+    /// Editor page loads this minute, by user (OPENS_PER_MINUTE).
+    opens: HashMap<u64, (u64, u32)>,
     /// Login challenges made this minute (CHALLENGES_PER_MINUTE).
     minute: u64,
     challenges: u32,
@@ -172,7 +176,7 @@ type Res = Result<(), u16>;
 
 impl Site {
     pub fn new(st: Store, conf: Conf) -> Site {
-        Site { st, docs: crate::docs::Docs::new(), conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, minute: 0, challenges: 0, swept_ms: 0 }
+        Site { st, docs: crate::docs::Docs::new(), conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, opens: HashMap::new(), minute: 0, challenges: 0, swept_ms: 0 }
     }
 
     // RESPONSES
@@ -217,6 +221,9 @@ impl Site {
             return None;
         }
         let v = c.get(i + 4..i + 68)?;
+        if !matches!(c.get(i + 68), None | Some(b';') | Some(b' ')) {
+            return None;
+        }
         let t: [u8; 32] = unhex(v)?.try_into().ok()?;
         let (id, _) = self.st.session(&t, now)?;
         Some(Who { id, token: t })
@@ -805,7 +812,17 @@ impl Site {
     fn delete_blog(&mut self, r: &mut R, slug: &str, out: &mut Vec<u8>) -> Res {
         let (bid, _) = self.blog_id(slug)?;
         let p = self.permit(r, bid, 0, Action::DeleteBlog { blog: bid })?;
+        let mut ids = vec![];
+        self.st.q(Q::BlogPostIds, &[Val::Int(bid as i64)], |row| ids.push(row.int(0) as u64)).map_err(db_code)?;
         self.st.write(&p, r.now(), true, |st, _| Ok(st.run(Q::BlogDel, &[Val::Int(bid as i64)])?)).map_err(no_code)?;
+        // (Memory only: ids are never reused, so these could not be served
+        // for other posts anyway; see the schema.)
+        for id in ids {
+            self.docs.forget(id);
+            if let Some((_, m)) = self.cache.map.remove(&id) {
+                self.cache.bytes -= m.len();
+            }
+        }
         resp::redirect(out, "/dash", b"");
         Ok(())
     }
@@ -917,8 +934,21 @@ impl Site {
             .q(Q::EditGet, &[Val::Int(id as i64)], |row| e = Some((row.text(7).to_string(), row.text(1).to_string(), row.int(2) != 0, row.text(3).to_string(), row.text(5).to_string())))
             .map_err(db_code)?;
         let (title, slug, published, blog_slug, _) = e.ok_or(404u16)?;
-        // A replica number for this page's editor: the ids it makes.
+        // A replica number for this page's editor: the ids it makes. Each
+        // is a row, so page loads are limited (OPENS_PER_MINUTE a user).
         let uid = r.uid();
+        let minute = r.now() / 60_000;
+        let n = self.opens.entry(uid).or_insert((minute, 0));
+        if n.0 != minute {
+            *n = (minute, 0);
+        }
+        n.1 += 1;
+        if n.1 > OPENS_PER_MINUTE {
+            return Err(429);
+        }
+        if self.opens.len() > 100_000 {
+            self.opens.retain(|_, v| v.0 == minute);
+        }
         let rep = self.st.one(Q::RepNew, &[Val::Int(id as i64)]).map_err(db_code)?.ok_or(404u16)?;
         self.st.run(Q::RepAdd, &[Val::Int(id as i64), Val::Int(rep), Val::Int(uid as i64)]).map_err(db_code)?;
         // The text in the page (for reading while the editor loads, and the

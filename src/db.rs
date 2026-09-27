@@ -63,8 +63,11 @@ pub const MIGRATIONS: &[&str] = &[
        sent_ms INTEGER
      ) STRICT;
      CREATE INDEX outbox_to ON outbox(to_email, created_ms);
+     -- Ids are never reused (AUTOINCREMENT): caches keyed by id (documents,
+     -- rendered posts, in every worker) can never serve a deleted row's
+     -- content for a new one.
      CREATE TABLE blog (
-       id INTEGER PRIMARY KEY,
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
        slug TEXT NOT NULL UNIQUE CHECK (length(slug) BETWEEN 1 AND 64 AND slug NOT GLOB '*[^a-z0-9-]*'),
        title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
        created_ms INTEGER NOT NULL
@@ -77,7 +80,7 @@ pub const MIGRATIONS: &[&str] = &[
      ) STRICT, WITHOUT ROWID;
      CREATE INDEX member_user ON member(user_id);
      CREATE TABLE post (
-       id INTEGER PRIMARY KEY,
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
        blog_id INTEGER NOT NULL REFERENCES blog(id) ON DELETE CASCADE,
        slug TEXT NOT NULL CHECK (length(slug) BETWEEN 1 AND 80 AND slug NOT GLOB '*[^a-z0-9-]*'),
        title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
@@ -195,6 +198,7 @@ queries! {
     MemberAdd => "INSERT INTO member(blog_id, user_id, role) VALUES (?1, ?2, ?3)",
     MemberDel => "DELETE FROM member WHERE blog_id = ?1 AND user_id = ?2 AND role = 2",
     BlogDel => "DELETE FROM blog WHERE id = ?1",
+    BlogPostIds => "SELECT id FROM post WHERE blog_id = ?1",
     BlogOwner => "SELECT u.name, u.handle FROM member m JOIN user u ON u.id = m.user_id WHERE m.blog_id = ?1 AND m.role = 1",
     BlogSlug => "SELECT slug FROM blog WHERE id = ?1",
     MyBlogs => "SELECT b.id, b.slug, b.title, m.role, (SELECT count(*) FROM post p WHERE p.blog_id = b.id) FROM member m JOIN blog b ON b.id = m.blog_id WHERE m.user_id = ?1 ORDER BY b.title LIMIT 1000",

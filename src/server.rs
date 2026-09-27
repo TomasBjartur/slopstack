@@ -49,6 +49,7 @@ impl<'a> Request<'a> {
 /// What the application may use besides the request: the time, and
 /// randomness (both from Io, so the simulator drives them from its seed).
 pub struct Ctx<'a> {
+    /// Wall-clock time (Io::wall_ms): what the application stores.
     pub now_ms: u64,
     pub random: &'a mut dyn FnMut(&mut [u8]),
 }
@@ -533,8 +534,9 @@ impl<I: Io, A: App> Server<I, A> {
                 let wants_close = req.header(b"connection").map_or(false, |v| v.eq_ignore_ascii_case(b"close"));
                 self.resp.clear();
                 let io = &mut self.io;
+                let wall = io.wall_ms();
                 let mut random = |b: &mut [u8]| io.random(b);
-                let mut cx = Ctx { now_ms: now, random: &mut random };
+                let mut cx = Ctx { now_ms: wall, random: &mut random };
                 self.app.handle(&req, &mut cx, &mut self.resp) && !wants_close
             };
             // The rest of the input (pipelined requests) to the front.

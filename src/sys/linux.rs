@@ -70,6 +70,7 @@ const SIGTERM: u64 = 15;
 const EPOLL_CTL_ADD: c_int = 1;
 const EPOLL_CTL_DEL: c_int = 2;
 const EPOLL_CLOEXEC: c_int = 0o2000000;
+const CLOCK_REALTIME: c_int = 0;
 const CLOCK_MONOTONIC: c_int = 1;
 pub const EAGAIN: c_int = 11;
 const EINTR: c_int = 4;
@@ -225,13 +226,23 @@ impl Epoll {
     }
 }
 
+/// Monotonic milliseconds (since boot): for timeouts and deadlines only.
 pub fn now_ms() -> u64 {
+    clock_ms(CLOCK_MONOTONIC)
+}
+
+/// Wall-clock milliseconds since 1970: for what is stored (dates, expiry).
+pub fn wall_ms() -> u64 {
+    clock_ms(CLOCK_REALTIME)
+}
+
+fn clock_ms(clock: c_int) -> u64 {
     let mut ts = timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: ts is a valid timespec for the call.
     unsafe {
-        clock_gettime(CLOCK_MONOTONIC, &mut ts);
+        clock_gettime(clock, &mut ts);
     }
-    ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
+    ts.tv_sec.max(0) as u64 * 1000 + ts.tv_nsec.max(0) as u64 / 1_000_000
 }
 
 /// Fills buf from the kernel's random source (blocks only before the

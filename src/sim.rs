@@ -122,6 +122,12 @@ impl Io for SimIo {
         self.now
     }
 
+    /// The simulated wall clock: an epoch in 2026 plus the simulated time
+    /// (the application's clock skew and jumps are its own tests' matter).
+    fn wall_ms(&mut self) -> u64 {
+        1_790_000_000_000 + self.now
+    }
+
     fn random(&mut self, out: &mut [u8]) {
         for b in out {
             *b = self.rng.next() as u8;

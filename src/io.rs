@@ -31,7 +31,11 @@ pub struct IoEvent {
 pub const LISTENER: u32 = u32::MAX;
 
 pub trait Io {
+    /// Monotonic milliseconds: timeouts.
     fn now_ms(&mut self) -> u64;
+    /// Wall-clock milliseconds since 1970: what the application stores
+    /// (dates, expiry). It may jump (a clock set by hand, NTP).
+    fn wall_ms(&mut self) -> u64;
     fn random(&mut self, out: &mut [u8]);
     /// Waits at most timeout_ms for events; appends them to out.
     fn wait(&mut self, out: &mut Vec<IoEvent>, timeout_ms: u64);
@@ -70,6 +74,10 @@ impl LinuxIo {
 impl Io for LinuxIo {
     fn now_ms(&mut self) -> u64 {
         sys::now_ms()
+    }
+
+    fn wall_ms(&mut self) -> u64 {
+        sys::wall_ms()
     }
 
     fn random(&mut self, out: &mut [u8]) {
