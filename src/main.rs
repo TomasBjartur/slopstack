@@ -8,11 +8,20 @@ pub mod spec_http;
 pub mod http;
 pub mod sys {
     pub mod linux;
+    pub mod sqlite;
+    pub mod crypto;
 }
+pub mod db;
 pub mod io;
 pub mod server;
 pub mod app;
 pub mod sim;
+pub mod tests {
+    pub mod crypto;
+    pub mod db;
+    pub mod http;
+    pub mod sim;
+}
 
 verus! {
 #[verifier::external_body]
@@ -22,6 +31,17 @@ fn main() {
 }
 
 fn run() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "test" {
+        match args[2].as_str() {
+            "crypto" => tests::crypto::run(),
+            "db" => tests::db::run(),
+            "http" => tests::http::run(),
+            "sim" => tests::sim::run(),
+            t => panic!("no test {t}"),
+        }
+        return;
+    }
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8190);
     let io = io::LinuxIo::new(port).unwrap_or_else(|e| panic!("cannot listen on {port}: errno {e}"));
     eprintln!("listening on 127.0.0.1:{port}");

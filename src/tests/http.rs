@@ -6,25 +6,12 @@
 // - fed byte by byte: "more" until the head is whole, then the same answer;
 // - the 10x rule: the worst real head is ~8 KB (cookies); at 80 KB it is
 //   refused with 431, at once; and time grows linearly with the head.
-use vstd::prelude::*;
 
-#[path = "../src/limits.rs"]
-pub mod limits;
-#[path = "../spec/http.rs"]
-pub mod spec_http;
-#[path = "../src/http.rs"]
-pub mod http;
 
-use http::{parse, Parsed};
-use limits::*;
-use spec_http::HeaderPos;
+use crate::http::{parse, Parsed};
+use crate::limits::*;
+use crate::spec_http::HeaderPos;
 
-verus! {
-#[verifier::external_body]
-fn main() {
-    run();
-}
-}
 
 struct Rng(u64);
 impl Rng {
@@ -176,7 +163,7 @@ fn gen_head(r: &mut Rng) -> Vec<u8> {
     b
 }
 
-fn run() {
+pub fn run() {
     let mut fails = 0;
     let mut hs: Vec<HeaderPos> = Vec::with_capacity(HEADERS_MAX);
     let mut r = Rng(0x9e3779b97f4a7c15);
@@ -263,5 +250,7 @@ fn run() {
         large.len() as f64 / small.len() as f64
     );
     println!("\n{fails} failure(s)");
-    std::process::exit(if fails > 0 { 1 } else { 0 });
+    if fails > 0 {
+        std::process::exit(1);
+    }
 }

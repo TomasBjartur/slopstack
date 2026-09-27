@@ -12,37 +12,12 @@
 //   - the same seed gives the same run (deterministic).
 // 10x: one seed runs 100,000 connections at once (CONN_MAX: ten times the
 // worst crowd we expect).
-use vstd::prelude::*;
 
-#[path = "../src/limits.rs"]
-pub mod limits;
-#[path = "../spec/http.rs"]
-pub mod spec_http;
-#[path = "../src/http.rs"]
-pub mod http;
-#[path = "../src/sys/linux.rs"]
-pub mod sys_linux;
-pub mod sys {
-    pub use super::sys_linux as linux;
-}
-#[path = "../src/io.rs"]
-pub mod io;
-#[path = "../src/server.rs"]
-pub mod server;
-#[path = "../src/app.rs"]
-pub mod app;
-#[path = "../src/sim.rs"]
-pub mod sim;
 
-use limits::*;
-use sim::{Rng, SimIo};
+use crate::limits::*;
+use crate::sim::{Rng, SimIo};
+use crate::{app, server};
 
-verus! {
-#[verifier::external_body]
-fn main() {
-    run();
-}
-}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
@@ -184,7 +159,7 @@ fn flood_then_readers(check: &mut dyn FnMut(bool, String)) {
     println!("a flood of {flood} slow senders, then 200 readers: {ok} answered; {} flood connections evicted", s.stats.evicted);
 }
 
-fn run() {
+pub fn run() {
     let mut fails = 0;
     let mut checks = 0;
     let mut check = |ok: bool, msg: String| {
@@ -227,5 +202,7 @@ fn run() {
     }
     println!("100,000 connections at once: {acc} accepted, {req} requests answered ({:.1} s simulated run)", t.elapsed().as_secs_f64());
     println!("\n{checks} checks, {fails} failure(s)");
-    std::process::exit(if fails > 0 { 1 } else { 0 });
+    if fails > 0 {
+        std::process::exit(1);
+    }
 }

@@ -4,14 +4,15 @@ set -eu
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$HOME/.elan/bin:$PATH"
 VERUS="$HOME/opt/verus/verus-x86-linux/verus"
-LINK="-C linker=$HOME/opt/rustlink/cc.sh"
+LINK="-C linker=$HOME/opt/rustlink/cc.sh -L build -l static=sqlite3 -l static=hacl"
 mkdir -p build
+tools/build_c.sh
 echo "== proofs (Verus)"
 "$VERUS" src/main.rs
 echo "== build"
 "$VERUS" src/main.rs --no-verify --compile $LINK -C opt-level=3 -o build/server
-"$VERUS" tests/http_test.rs --no-verify --compile $LINK -C opt-level=3 -o build/http_test
 echo "== tests"
-build/http_test
-"$VERUS" tests/sim_test.rs --no-verify --compile $LINK -C opt-level=3 -o build/sim_test
-build/sim_test
+for t in crypto db http sim; do
+  echo "-- $t"
+  build/server test $t | tail -4
+done

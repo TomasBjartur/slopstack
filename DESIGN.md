@@ -7,7 +7,9 @@ public reading pages), rebuilt from what the first version (Bend 2 + C,
 
 1. **Much faster than Substack** on every measure a reader or writer feels
    (time to first byte, largest paint, input latency, JS shipped) and on
-   server cost, with published numbers.
+   server cost, with published numbers. **Every page feels like an SPA**:
+   no interaction waits on a full page load, clicks answer at once
+   (optimistic), navigation is instant.
 2. **Correctness checked as hard as we can**: machine-checked proofs about
    the code that runs, and every other check where proofs do not reach.
    Most of the code is written by an AI; the laws are owned by people.
@@ -44,7 +46,8 @@ public reading pages), rebuilt from what the first version (Bend 2 + C,
 | Crypto | HACL* (vendored, formally verified C): SHA-256, P-256 | passkeys, tokens |
 | TLS, HTTP/2 | Caddy in front | we do not implement TLS |
 | Browser | plain JS modules, the CRDT as WebAssembly (the same Verus-checked Rust) | one proved CRDT on both sides |
-| Server-driven fragments | Datastar (vendored, pinned, CSP mode) | likes, comments, search, live updates |
+| Interaction with the server | Datastar (vendored, pinned, CSP mode), on every page | fragments patched in, optimistic signals: forms, likes, dashboards, co-authors, search, live updates |
+| Client-owned work | our own JS modules | the editor, undo, Vim, Visual mode, dialogs |
 
 **Dependencies.** None at run time besides the two vendored C libraries
 (pinned by hash, with a written reason). Everything else we write: the
@@ -74,8 +77,28 @@ none is planned.
   (503, 413, 429), never an allocation.
 - **Pages**: templates compile to render plans; stored post HTML is spliced
   in as bytes; a page cache keyed by (page, generation) serves repeat
-  reads with no work. Reading pages ship no JS unless they have something
-  interactive.
+  reads with no work.
+
+## Feeling like an SPA
+
+Every page is served whole (fast first paint, works without JS), then
+behaves like an app:
+- **Navigation**: speculation rules prerender links on hover (the next page
+  is ready before the click); view transitions cross-fade; the
+  back/forward cache keeps pages alive. No client router.
+- **Server interaction through Datastar** (one small cached script on every
+  page): a form or button sends with fetch and the server answers with
+  fragments to patch in (never a whole page); signals update the page at
+  once (a like counts before the server answers) and the answer confirms
+  it. Live updates (co-authors' edits to titles, new comments later)
+  arrive over the same channel.
+- **Local JS where the browser must own the work**: the editor (local-first,
+  collaborative), undo, Vim, Visual mode, dialogs.
+- **Tested like the rest**: browser tests measure input-to-next-paint for
+  every interaction (budget: one frame for local work, 100 ms for a server
+  round trip on the same machine), and fail on a full page load where a
+  fragment was expected, on layout shift, or on a flash of unstyled or
+  stale content.
 
 ## Documents (novel-length from the start)
 

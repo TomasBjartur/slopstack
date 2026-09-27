@@ -40,8 +40,10 @@ CPU throttled. Sizes nobody tested are where the first version broke.
   comment on why it is sound, checked by Kani where it can be.
 - **Data-oriented**: arrays and indexes, not pointer graphs; typed arrays
   in the browser; no allocation in hot loops.
-- **Pages ship no JS unless they need it**; the platform first
-  (speculation rules, view transitions, bfcache, forms).
+- **Every page feels like an SPA** (DESIGN.md): Datastar on every page for
+  server interaction (fragments, optimistic signals), our own JS where the
+  browser must own the work, the platform for navigation (speculation
+  rules, view transitions, bfcache). No framework, no client router.
 
 ## Toolchains (pinned)
 
