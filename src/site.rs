@@ -316,12 +316,20 @@ impl Site {
                     resp::redirect(out, "/dash", b"");
                     return Ok(());
                 }
-                self.html(r, out, 200, |h| pages::signup(h, "", "", "", ""));
+                let next = safe_next(Form::parse(r.query.as_bytes()).as_ref().and_then(|q| q.get("next")));
+                self.html(r, out, 200, |h| pages::signup(h, "", "", "", "", next.as_deref().unwrap_or("")));
                 Ok(())
             }
             ["login"] | ["recover"] => {
-                let s = r.signed_in();
-                self.html(r, out, 200, |h| pages::login(h, s));
+                // Signed in already: on to where it was going.
+                if r.signed_in() {
+                    let next = safe_next(Form::parse(r.query.as_bytes()).as_ref().and_then(|q| q.get("next"))).unwrap_or_else(|| "/dash".into());
+                    resp::redirect(out, &next, b"");
+                    return Ok(());
+                }
+                // (/recover: the same page, its "lost your passkey" part open.)
+                let lost = parts[0] == "recover";
+                self.html(r, out, 200, |h| pages::login(h, false, lost));
                 Ok(())
             }
             ["handle"] => self.handle_check(r, out),
@@ -587,12 +595,12 @@ impl Site {
 
     /// A fresh emailed link: its token (hex) and, unless in direct mode, the
     /// mail in the outbox. Inside the caller's transaction.
-    fn email_link(st: &mut Store, conf: &Conf, token: &[u8; 32], email: &str, name: &str, handle: &str, purpose: i64, now: u64) -> Result<String, u16> {
+    fn email_link(st: &mut Store, conf: &Conf, token: &[u8; 32], email: &str, name: &str, handle: &str, purpose: i64, now: u64, next: &str) -> Result<String, u16> {
         let t = hex(token);
         st.run(Q::TokenNew, &[Val::Blob(&sha256(token)), Val::Text(email.as_bytes()), Val::Text(name.as_bytes()), Val::Text(handle.as_bytes()), Val::Int(purpose), Val::Int((now + TOKEN_MS) as i64)]).map_err(db_code)?;
         if !conf.direct {
             let (subject, what) = if purpose == 1 { ("Finish signing up", "finish signing up") } else { ("Add a passkey", "add a passkey to your account") };
-            let body = format!("Open this link to {what}:\n\n{}/verify?t={t}\n\nIt works once, for 30 minutes. If you did not ask for this, ignore this email: nothing happens without the link.\n", conf.origin);
+            let body = format!("Open this link to {what}:\n\n{}{}\n\nIt works once, for 30 minutes. If you did not ask for this, ignore this email: nothing happens without the link.\n", conf.origin, verify_url(&t, next));
             st.run(Q::Outbox, &[Val::Text(email.as_bytes()), Val::Text(subject.as_bytes()), Val::Text(body.as_bytes()), Val::Int(now as i64)]).map_err(db_code)?;
         }
         Ok(t)
@@ -603,14 +611,27 @@ impl Site {
         let name = f.text("name", 80, false);
         let email = f.get("email").map(|e| e.trim().to_ascii_lowercase()).filter(|e| email_ok(e));
         let handle = f.get("handle").and_then(Site::handle_of);
-        let (Some(name), Some(email), Some(handle)) = (name, email, handle) else {
+        let next = safe_next(f.get("next"));
+        let nx = next.as_deref().unwrap_or("");
+        let (Some(name), Some(email), Some(handle)) = (name.clone(), email.clone(), handle.clone()) else {
             let (n, e, hd) = (f.get("name").unwrap_or(""), f.get("email").unwrap_or(""), f.get("handle").unwrap_or(""));
             let (n, e, hd) = (n.chars().take(80).collect::<String>(), e.chars().take(254).collect::<String>(), hd.chars().take(31).collect::<String>());
-            self.html(r, out, 400, |h| pages::signup(h, "Check the fields: a name, a username (3 to 30 of a-z, 0-9 and _, starting with a letter) and an email address.", &n, &hd, &e));
+            // What exactly is wrong, field by field.
+            let mut note = String::new();
+            if name.is_none() {
+                note.push_str("Your name: 1 to 80 characters, on one line. ");
+            }
+            if handle.is_none() {
+                note.push_str("Username: 3 to 30 of a-z, 0-9 and _, starting with a letter. ");
+            }
+            if email.is_none() {
+                note.push_str("Email: an address like you@example.com.");
+            }
+            self.html(r, out, 400, |h| pages::signup(h, note.trim(), &n, &hd, &e, nx));
             return Ok(());
         };
         if self.handle_taken(&handle, &email, now)? {
-            self.html(r, out, 409, |h| pages::signup(h, "That username is taken. Choose another.", &name, "", &email));
+            self.html(r, out, 409, |h| pages::signup(h, "That username is taken. Choose another.", &name, "", &email, nx));
             return Ok(());
         }
         let token = r.random::<32>();
@@ -626,11 +647,11 @@ impl Site {
             if sent >= MAILS_PER_HOUR {
                 return Ok(None);
             }
-            Site::email_link(st, conf, &token, &email, &name, &handle, 1, now).map(Some)
+            Site::email_link(st, conf, &token, &email, &name, &handle, 1, now, nx).map(Some)
         })?;
         match (res, self.conf.direct) {
-            (Some(t), true) => resp::redirect(out, &format!("/verify?t={t}"), b""),
-            (None, true) => self.html(r, out, 409, |h| pages::signup(h, "This email may already have an account: log in instead.", &name, &handle, &email)),
+            (Some(t), true) => resp::redirect(out, &verify_url(&t, nx), b""),
+            (None, true) => self.html(r, out, 409, |h| pages::signup(h, "This email may already have an account: log in instead.", &name, &handle, &email, nx)),
             _ => self.html(r, out, 200, pages::check_email),
         }
         Ok(())
@@ -651,7 +672,7 @@ impl Site {
             }
             let mut nh = (String::new(), String::new());
             st.q(Q::UserInfo, &[Val::Int(uid)], |row| nh = (row.text(0).into(), row.text(1).into())).map_err(db_code)?;
-            Site::email_link(st, conf, &token, &email, &nh.0, &nh.1, 2, now).map(|_| ())
+            Site::email_link(st, conf, &token, &email, &nh.0, &nh.1, 2, now, "").map(|_| ())
         })?;
         self.html(r, out, 200, pages::check_email);
         Ok(())
@@ -806,9 +827,11 @@ impl Site {
     }
 
     // DASHBOARD
+    /// Signed in, or sent to log in, and then back here (?next=).
     fn signed(&self, r: &R, out: &mut Vec<u8>) -> bool {
         if !r.signed_in() {
-            resp::redirect(out, "/login", b"");
+            let here = if r.query.is_empty() { r.path.to_string() } else { format!("{}?{}", r.path, r.query) };
+            resp::redirect(out, &format!("/login?next={}", crate::form::encode(&here)), b"");
             return false;
         }
         true
@@ -1552,6 +1575,24 @@ fn txn<T>(st: &mut Store, f: impl FnOnce(&mut Store) -> Result<T, u16>) -> Resul
             Err(e)
         }
     }
+}
+
+/// Where to go after logging in or signing up: a path on this site (not
+/// another site's address, not a log-in page again), or nothing.
+fn safe_next(n: Option<&str>) -> Option<String> {
+    let n = n?;
+    let ok = n.starts_with('/')
+        && !n.starts_with("//")
+        && n.len() <= 1024
+        && n.bytes().all(|c| c.is_ascii_graphic() && c != b'\\')
+        && !["/login", "/signup", "/verify", "/recover"].iter().any(|p| n == *p || n.starts_with(&format!("{p}?")) || n.starts_with(&format!("{p}/")));
+    if ok { Some(n.to_string()) } else { None }
+}
+
+/// The emailed link (and, in test mode, the page) for a token, with where
+/// to go afterwards.
+fn verify_url(t: &str, next: &str) -> String {
+    if next.is_empty() { format!("/verify?t={t}") } else { format!("/verify?t={t}&next={}", crate::form::encode(next)) }
 }
 
 /// An image's type from its first bytes (JPEG, PNG, GIF, WebP), or None.

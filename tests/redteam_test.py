@@ -114,7 +114,7 @@ def session(db, uid, expires_in=3600_000):
 
 def refused(st, loc=None):
     # Refused: an error status, or (for a signed-out writer) off to log in.
-    return st in (400, 403, 404, 405, 409, 413, 429) or (st == 303 and loc == "/login")
+    return st in (400, 403, 404, 405, 409, 413, 429) or (st == 303 and (loc == "/login" or (loc or "").startswith("/login?next=%2F")))
 
 
 def rep_of(sid, post):
@@ -293,7 +293,7 @@ def run(srv, db):
         for path in ["/b/o/secret", f"/edit/{draft}", "/dash/o", f"/edit/{draft}?x=1"]:
             st, loc, body = http("GET", path, sid)
             leak = "zyzzyva" in body or "Secretdraft" in body
-            ok = (st == 404 or (st == 303 and loc == "/login" and sid in (None, forged))) and not leak
+            ok = (st == 404 or (st == 303 and (loc == "/login" or (loc or "").startswith("/login?next=%2F")) and sid in (None, forged))) and not leak
             check(f"{who}: draft not readable at {path}", ok, (st, loc, leak))
         for path in ["/", "/?page=2", "/b/o", "/b/o?page=2", "/u/owner", "/u/coauthor", "/b/x"]:
             st, _, body = http("GET", path, sid)
@@ -352,15 +352,15 @@ def run(srv, db):
     # SESSIONS AND ODD INPUT
     for bad in ["", "x", "0" * 64, "g" * 64, a.upper(), a[:-2], "../" * 10, "%00" + a, " " + "0" * 63, forged, old_sid]:
         st, loc, body = http("GET", "/dash", bad or None)
-        check(f"malformed or unknown session {bad[:12]!r}: not signed in", st == 303 and loc == "/login", (st, loc))
+        check(f"malformed or unknown session {bad[:12]!r}: not signed in", st == 303 and (loc == "/login" or (loc or "").startswith("/login?next=%2F")), (st, loc))
     st, loc, _ = http("GET", "/dash", cookie=f"xsid={o}")
-    check("a cookie named xsid is not the session", st == 303 and loc == "/login", (st, loc))
+    check("a cookie named xsid is not the session", st == 303 and (loc == "/login" or (loc or "").startswith("/login?next=%2F")), (st, loc))
     st, loc, _ = http("GET", "/dash", cookie=f"theme=dark; sid={o}")
     check("the session among other cookies still works (sanity)", st == 200, (st, loc))
     # (A token followed by more characters is read as the token: only its
     # own holder can send it, so at most the holder is signed in.)
     st, loc, body = http("GET", "/dash", cookie=f"sid={a}00")
-    check("a token with trailing characters signs in no one else", (st == 303 and loc == "/login") or st == 200, (st, loc))
+    check("a token with trailing characters signs in no one else", (st == 303 and (loc == "/login" or (loc or "").startswith("/login?next=%2F"))) or st == 200, (st, loc))
     for path in ["/edit/0", "/edit/4294967296", "/edit/99999999999999999999", "/edit/-1", "/edit/1e3", "/edit/%31", f"/edit/{draft}/sync",
                  "/b/o/..%2f..%2fetc", "/s/..%2f..%2fetc%2fpasswd", "/s/app.css%00.js", "/%2e%2e/", "/b/o/pub%0d%0aSet-Cookie:%20x=1",
                  "/u/%00", "/u/" + "a" * 5000, "/dash/o%2f..%2fx", "/b/%C3%A9", "/verify?t=" + "0" * 64, "/verify?t=zz", "/handle?h=%00",

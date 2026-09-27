@@ -18,6 +18,7 @@ run python3 tests/redteam_test.py
 run python3 tests/social_test.py
 run python3 tests/workers_test.py
 run python3 tests/browser_test.py
+run python3 tests/login_test.py
 run python3 tests/collab_test.py
 run python3 tests/editor_test.py
 run python3 tests/tab_preview_test.py

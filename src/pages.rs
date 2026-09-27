@@ -283,16 +283,25 @@ pub fn post(h: &mut H, signed_in: bool, v: &PostView, body: &Markup, social_: Op
 }
 
 // ACCOUNTS
-pub fn signup(h: &mut H, note: &str, name: &str, handle: &str, email: &str) {
+/// next: where to go once signed up (a path, checked by the server).
+pub fn signup(h: &mut H, note: &str, name: &str, handle: &str, email: &str, next: &str) {
     open(h, "Start writing", false, false);
     h.r("<div class=\"center card\"><h1>Start writing</h1><p class=\"muted\">No password to remember: next, your device creates a passkey (fingerprint, face or PIN).</p>");
     if !note.is_empty() {
         h.r("<p class=\"notice\" role=\"alert\">").t(note).r("</p>");
     }
-    h.r("<form method=\"post\" action=\"/signup\" class=\"stack\"><label>Your name <span class=\"hint\">Shown on your posts.</span><input name=\"name\" required maxlength=\"80\" autocomplete=\"name\" value=\"").t(name)
+    h.r("<form method=\"post\" action=\"/signup\" class=\"stack\">");
+    if !next.is_empty() {
+        h.r("<input type=\"hidden\" name=\"next\" value=\"").t(next).r("\">");
+    }
+    h.r("<label>Your name <span class=\"hint\">Shown on your posts.</span><input name=\"name\" required maxlength=\"80\" autocomplete=\"name\" value=\"").t(name)
         .r("\"></label><label>Username <span class=\"hint\">Unique: 3 to 30 of a-z, 0-9 and _, starting with a letter.</span><input name=\"handle\" required minlength=\"3\" maxlength=\"31\" pattern=\"@?[A-Za-z][A-Za-z0-9_]{2,29}\" autocapitalize=\"none\" autocomplete=\"username\" placeholder=\"e.g. maya\" value=\"").t(handle)
         .r("\" data-bind:_h data-on:input__debounce.300ms=\"@get('/handle?h=' + encodeURIComponent($_h))\"><span class=\"form-note meta\" id=\"handle-note\" aria-live=\"polite\"></span></label><label>Email <span class=\"hint\">Only for getting back in if you lose your device.</span><input name=\"email\" type=\"email\" required maxlength=\"254\" autocomplete=\"email\" value=\"").t(email)
-        .r("\"></label><button class=\"primary big\">Continue</button></form><p class=\"meta\">Already have an account? <a href=\"/login\">Log in</a></p></div>");
+        .r("\"></label><button class=\"primary big\">Continue</button></form><p class=\"meta\">Already have an account? <a href=\"/login");
+    if !next.is_empty() {
+        h.r("?next=").t(&crate::form::encode(next));
+    }
+    h.r("\">Log in</a></p></div>");
     close(h);
 }
 
@@ -320,9 +329,10 @@ pub fn verify(h: &mut H, token_hex: &str, email: &str, adding: bool) {
     close(h);
 }
 
-pub fn login(h: &mut H, signed_in: bool) {
+/// lost: the "lost your passkey" part open (the /recover address).
+pub fn login(h: &mut H, signed_in: bool, lost: bool) {
     open(h, "Log in", signed_in, false);
-    h.r("<div class=\"center card stack\"><h1>Welcome back</h1><button id=\"passkey-login\" class=\"primary big\">Log in with a passkey</button><p id=\"passkey-status\" class=\"meta\" role=\"status\"></p><details><summary>Lost your passkey?</summary><form method=\"post\" action=\"/recover\" class=\"stack\"><label>Email <input name=\"email\" type=\"email\" required maxlength=\"254\" autocomplete=\"email\"></label><div><button>Email me a link</button></div></form></details><p class=\"meta\">New here? <a href=\"/signup\">Create an account</a></p></div><script type=\"module\" src=\"");
+    h.r("<div class=\"center card stack\"><h1>Welcome back</h1><button id=\"passkey-login\" class=\"primary big\">Log in with a passkey</button><p id=\"passkey-status\" class=\"meta\" role=\"status\" aria-live=\"polite\"></p>").r(if lost { "<details open>" } else { "<details>" }).r("<summary>Lost your passkey?</summary><form method=\"post\" action=\"/recover\" class=\"stack\"><label>Email <input name=\"email\" type=\"email\" required maxlength=\"254\" autocomplete=\"email\"></label><div><button>Email me a link</button></div></form></details><p class=\"meta\">New here? <a href=\"/signup\">Create an account</a></p></div><script type=\"module\" src=\"");
     asset(h, "passkey.js");
     h.r("\"></script>");
     close(h);

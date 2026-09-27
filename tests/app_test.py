@@ -178,7 +178,7 @@ def run(dbpath):
     st, _, body, _ = req("GET", "/")
     check("home renders", st == 200 and "Recent posts" in body, st)
     st, loc, _, _ = req("GET", "/dash")
-    check("dash redirects anonymous to login", st == 303 and loc == "/login", (st, loc))
+    check("dash redirects anonymous to login, remembering where", st == 303 and loc == "/login?next=%2Fdash", (st, loc))
     st, _, body, _ = req("GET", "/dash", a)
     check("dash for Alice", st == 200 and "Your blogs" in body, st)
     st, loc, _, _ = req("POST", "/blogs", a, {"slug": "alice", "title": "Alice's <Notes>"})
@@ -285,7 +285,7 @@ def run(dbpath):
     st, loc, _, head = req("POST", "/logout", a)
     check("logout clears cookie", st == 303 and "Max-Age=0" in head, (st, head))
     st, loc, _, _ = req("GET", "/dash", a)
-    check("old token no longer works", st == 303 and loc == "/login", (st, loc))
+    check("old token no longer works", st == 303 and (loc == "/login" or (loc or "").startswith("/login?next=%2F")), (st, loc))
 
     # Usability: addresses made from titles, save-and-publish, Edit links,
     # bylines, cached assets.

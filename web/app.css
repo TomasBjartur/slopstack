@@ -267,6 +267,8 @@ details.more { margin-top: 40px; text-align: center; }
 details.more .center { text-align: left; }
 .meta a, .byline a { text-decoration: none; }
 .meta a:hover, .byline a:hover { text-decoration: underline; }
+/* In a card or a dialog, small print's links are the ways on: they look it. */
+.card .meta a, dialog.modal .meta a { color: var(--accent); font-weight: 600; }
 
 /* DASHBOARD */
 

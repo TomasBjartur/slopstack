@@ -73,3 +73,49 @@ function ask(text, ok, then) {
   };
   dialog.showModal();
 }
+
+// LOGGING IN, IN PLACE: "Log in" (and every "log in to comment/like" link)
+// opens a dialog over the page, since a passkey login is one tap; after it,
+// the same page again, now signed in. Without JavaScript, or passkeys, the
+// link goes to the log-in page as before.
+const login = document.createElement("dialog");
+login.className = "modal";
+login.setAttribute("aria-labelledby", "login-title");
+login.innerHTML =
+  '<div class="stack"><h2 id="login-title">Log in</h2><p class="muted">With the passkey on your phone, laptop or security key.</p>' +
+  '<button type="button" class="primary big" id="login-go">Log in with a passkey</button><p class="meta" id="login-status" role="status" aria-live="polite"></p>' +
+  '<p class="meta">New here? <a href="/signup">Create an account</a>. Lost your passkey? <a href="/recover">Get a link to add one</a>.</p>' +
+  '<div class="row"><button type="button" class="quiet" id="login-cancel">Cancel</button></div></div>';
+let loginBound = false;
+async function openLogin(next) {
+  const url = new URL("passkey.js" + new URL(import.meta.url).search, import.meta.url);
+  const pk = await import(url.href);
+  if (!pk.supported()) return false;
+  if (!login.isConnected) document.body.appendChild(login);
+  if (!loginBound) {
+    loginBound = true;
+    login.querySelector("#login-cancel").addEventListener("click", () => login.close());
+    pk.bind(login.querySelector("#login-go"), login.querySelector("#login-status"), pk.login, () => {
+      // (The same page, signed in; or where the link said to go.)
+      if (login.dataset.next) location.assign(login.dataset.next);
+      else location.reload();
+    });
+  }
+  login.dataset.next = next || "";
+  login.querySelector("#login-status").textContent = "";
+  login.showModal();
+  login.querySelector("#login-go").focus();
+  return true;
+}
+document.addEventListener("click", (ev) => {
+  const a = ev.target.closest && ev.target.closest("a[href]");
+  if (!a || ev.defaultPrevented || ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+  const u = new URL(a.href, location.href);
+  if (u.origin !== location.origin || u.pathname !== "/login" || location.pathname === "/login") return;
+  ev.preventDefault();
+  const next = u.searchParams.get("next");
+  const safe = next && /^\/[^/\\]/.test(next) && !next.includes("\\") ? next : "";
+  openLogin(safe).then((ok) => {
+    if (!ok) location.assign(a.href);
+  }, () => location.assign(a.href));
+});
