@@ -299,6 +299,7 @@ details.more .center { text-align: left; }
 .editor-bar .status::before { content: "●"; margin-right: 6px; color: var(--ok); font-size: 0.7rem; vertical-align: 1px; }
 .editor-bar .status.busy::before { color: var(--accent); }
 .editor-bar .status.off::before { color: var(--danger); }
+.editor-bar .status a { color: var(--accent); font-weight: 600; }
 .write { padding-top: 28px; }
 .editor-bar details.schedule { position: relative; }
 .editor-bar details.schedule summary { list-style: none; }
@@ -384,6 +385,7 @@ dialog.modal .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: 
   .editor-bar .wrap { gap: 4px; }
   /* Just the status's dot (its words are still read out: role=status). */
   .editor-bar .status { font-size: 0; }
+  .editor-bar .status.off { font-size: 0.8rem; white-space: normal; }
   .editor-bar .btn, .editor-bar button { font-size: 0.9rem; }
   .editor-bar .btn, .editor-bar button { padding: 8px 12px; }
   .top nav { gap: 2px; }

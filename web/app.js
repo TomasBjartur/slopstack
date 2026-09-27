@@ -96,7 +96,14 @@ async function openLogin(next) {
     loginBound = true;
     login.querySelector("#login-cancel").addEventListener("click", () => login.close());
     pk.bind(login.querySelector("#login-go"), login.querySelector("#login-status"), pk.login, () => {
-      // (The same page, signed in; or where the link said to go.)
+      // A page that can carry on signed in (the editor: its unsent text
+      // goes now) says so by cancelling this event; else the same page
+      // again, signed in, or where the link said to go.
+      const ev = new CustomEvent("slop:login", { cancelable: true });
+      if (!document.dispatchEvent(ev)) {
+        login.close();
+        return;
+      }
       if (login.dataset.next) location.assign(login.dataset.next);
       else location.reload();
     });

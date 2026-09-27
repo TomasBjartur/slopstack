@@ -166,6 +166,31 @@ def run(db):
         check(f"?next={bad} after logging in: stays on the site (the dashboard)", js("location.origin") == BASE and here() == "/dash", js("location.href"))
         logout()
 
+    # The session ends while writing: the editor says so and offers to log
+    # in; logging in there saves the text, and the page stays.
+    go("/login")
+    js("document.getElementById('passkey-login').click()")
+    until("location.pathname === '/dash'")
+    go(f"/edit/{pid}")
+    until("document.getElementById('editor').ed && document.getElementById('editor').ed.loaded()")
+    if not js("document.querySelector('.wys').hidden"):
+        js("document.querySelector('.edit-tools .seg:nth-child(1)').click()")
+    db.execute("DELETE FROM session")
+    db.commit()
+    js("window.__stay = 2; const t = document.getElementById('editor'); t.focus(); document.execCommand('insertText', false, 'Written while logged out. ')")
+    offer = until("document.querySelector('#sync-status a[href=\"/login\"]') ? document.getElementById('sync-status').textContent : ''", 10)
+    check("session ended while writing: the editor says so and offers to log in", offer and "logged out" in offer, offer)
+    js("document.querySelector('#sync-status a[href=\"/login\"]').click()")
+    time.sleep(0.4)
+    js("document.getElementById('login-go').click()")
+    saved = until("document.getElementById('sync-status').textContent.startsWith('Saved')", 10)
+    check("…logging in there saves the text, and the page stays", saved and js("window.__stay") == 2 and not js("!!document.querySelector('dialog.modal[open]')"),
+          (js("document.getElementById('sync-status').textContent"), js("window.__stay")))
+    time.sleep(0.5)
+    check("…the text reached the server", "Written while logged out." in (js(f"fetch('/edit/{pid}/preview').then(r => r.text())") or ""))
+    go("/")
+    logout()
+
     # Signing up from a post comes back to it.
     go(f"/signup?next={urllib.parse.quote(post)}")
     js("document.querySelector('input[name=name]').value = 'Bo'; document.querySelector('input[name=handle]').value = 'bob';"
@@ -187,7 +212,7 @@ def run(db):
     check("…and keeps what was typed", js("document.querySelector('input[name=name]').value") == "Cy")
 
     errs = [e for e in ws.events if e.get("method") == "Runtime.exceptionThrown"
-            or (e.get("method") == "Log.entryAdded" and e["params"]["entry"]["level"] == "error" and not re.search(r"status of (400|404)", e["params"]["entry"].get("text", "")))]
+            or (e.get("method") == "Log.entryAdded" and e["params"]["entry"]["level"] == "error" and not re.search(r"status of (400|403|404)", e["params"]["entry"].get("text", "")))]
     check("no errors or CSP violations", not errs, [str(e)[:200] for e in errs[:2]])
 
 

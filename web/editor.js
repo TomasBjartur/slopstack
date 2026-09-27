@@ -97,7 +97,8 @@ function start(ta) {
       } else if (res.status === 400) {
         show("Not saved: check the title", "off");
       } else {
-        show(res.status === 403 ? "Not saved: are you logged out?" : res.status === 429 ? "Not saved: too many saves in a minute; try again shortly" : "Not saved (" + res.status + ")", "off");
+        if (res.status === 403) show("Not saved: you are logged out.", "off", true);
+        else show(res.status === 429 ? "Not saved: too many saves in a minute; try again shortly" : "Not saved (" + res.status + ")", "off");
       }
     } catch (e) {
       show("Offline: your text is kept on this device; save again when back online", "off");
@@ -399,11 +400,25 @@ function start(ta) {
   }
 
   // cls: "" all saved, "busy" work pending, "off" not reaching the server.
-  function show(msg, cls) {
+  // login: the message offers to log in (a session that ended).
+  function show(msg, cls, login = false) {
     if (!status) return;
     status.textContent = msg;
+    if (login) {
+      const a = document.createElement("a");
+      a.href = "/login";
+      a.textContent = "Log in";
+      status.append(" ", a);
+    }
     status.className = "status" + (cls ? " " + cls : "");
   }
+  // Logged in again from here (web/app.js's dialog): the unsent text goes
+  // now, the page stays.
+  document.addEventListener("slop:login", (ev) => {
+    ev.preventDefault();
+    show("Saving…", "busy");
+    schedule(0);
+  });
 
   // REMOTE CHANGES: merged, and each visible change passed to the view (and
   // the undo history) as it happens. A large batch: the text is compared.
@@ -464,8 +479,8 @@ function start(ta) {
     try {
       const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body, credentials: "same-origin" });
       if (!res.ok) {
-        show(res.status === 403 ? "Not saved: are you logged out, or no longer an author here?"
-          : res.status === 409 ? "Not saved: this post has reached its limit of stored edits. Your text is kept here; copy it into a new post."
+        if (res.status === 403) show("Not saved: you are logged out, or no longer an author here. Your text is kept on this device.", "off", true);
+        else show(res.status === 409 ? "Not saved: this post has reached its limit of stored edits. Your text is kept here; copy it into a new post."
           : "Could not save (" + res.status + ")", "off");
         ok = false;
         return false;
