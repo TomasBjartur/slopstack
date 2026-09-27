@@ -192,8 +192,8 @@ export class Visual {
     });
     root.addEventListener("paste", (ev) => {
       const files = [...(ev.clipboardData ? ev.clipboardData.files : [])].filter((f) => f.type.startsWith("image/"));
+      if (files.length) return; // images: the editor uploads them (see editor.js)
       ev.preventDefault();
-      if (files.length) return; // images: not in this version (pasted images are ignored)
       const t = ev.clipboardData ? ev.clipboardData.getData("text/plain") : "";
       if (t) document.execCommand("insertText", false, t);
     });

@@ -41,6 +41,12 @@ const PAGE_ITEMS: i64 = 20;
 const PAGES_MAX: u64 = 500;
 /// A post's text (the form's field): 8 MiB (a long novel is ~6 MB).
 const TEXT_MAX: usize = 8 << 20;
+/// Comments: threads a page, replies shown with them, characters each.
+const THREADS_PAGE: i64 = 20;
+const REPLIES_MAX: i64 = 1000;
+const COMMENT_MAX: usize = 10_000;
+/// An image (the editor resizes to fit): 2 MiB.
+const IMAGE_MAX: usize = 2 << 20;
 /// Editor page loads a user may make a minute (in each worker).
 const OPENS_PER_MINUTE: u32 = 120;
 /// Texts longer than this are not put in the edit page (the editor loads
@@ -260,6 +266,10 @@ impl Site {
             if let ["edit", id, "sync"] = parts.as_slice() {
                 return self.sync(r, id, out);
             }
+            // An image: bytes, not a form.
+            if let ["upload", id] = parts.as_slice() {
+                return self.upload(r, id, out);
+            }
             let form = Form::parse(r.req.body).ok_or(400u16)?;
             return self.post(r, &parts, &form, out);
         }
@@ -287,6 +297,10 @@ impl Site {
             ["dash"] => self.dash(r, out),
             ["dash", blog] => self.dash_blog(r, blog, "", out),
             ["edit", id] => self.edit(r, id, out),
+            ["comments", id] => self.more(r, id, out),
+            ["live", id] => self.live(r, id, out),
+            ["reply", id] => self.reply(r, id, out),
+            ["img", key] => self.image(r, key, out),
             _ => Err(404),
         }
     }
@@ -325,6 +339,9 @@ impl Site {
             ["edit", id, "publish"] => self.publish_draft(r, id, out),
             ["edit", id, "unpublish"] => self.unpublish(r, id, out),
             ["edit", id, "delete"] => self.delete_post(r, id, out),
+            ["comment", id] => self.comment(r, id, f, out),
+            ["comment", id, "delete"] => self.delete_comment(r, id, out),
+            ["like", id] => self.like(r, id, f, out),
             _ => Err(404),
         }
     }
@@ -458,7 +475,16 @@ impl Site {
             just_published: can_edit && m.published && r.query == "published=1",
         };
         let s = r.signed_in();
-        self.html(r, out, 200, |h| pages::post(h, s, &v, &body));
+        if !m.published {
+            self.html(r, out, 200, |h| pages::post(h, s, &v, &body, None));
+            return Ok(());
+        }
+        let (likes, count) = self.social_counts(m.id)?;
+        let liked = r.signed_in() && self.st.one(Q::Liked, &[Val::Int(m.id as i64), Val::Int(r.uid() as i64)]).map_err(db_code)?.is_some();
+        let (cs, more_after) = self.threads(m.id, 0, r.uid(), can_edit)?;
+        let last = self.st.one(Q::LastComment, &[Val::Int(m.id as i64)]).map_err(db_code)?.unwrap_or(0) as u64;
+        let sc = pages::Social { likes, liked, count, comments: &cs, more_after, last };
+        self.html(r, out, 200, |h| pages::post(h, s, &v, &body, Some(&sc)));
         Ok(())
     }
 
@@ -1098,6 +1124,289 @@ impl Site {
         Ok(())
     }
 
+    // COMMENTS AND LIKES (Datastar: every form and link also works without
+    // JavaScript, as a page load; with it, the answer is patches)
+    fn social_counts(&mut self, pid: u64) -> Result<(i64, i64), u16> {
+        let mut c = (0, 0);
+        self.st.q(Q::Social, &[Val::Int(pid as i64)], |row| c = (row.int(0), row.int(1))).map_err(db_code)?;
+        Ok(c)
+    }
+
+    fn comment_rows(&mut self, q: Q, args: &[Val], uid: u64, moderator: bool) -> Result<Vec<pages::CommentView>, u16> {
+        let mut v = Vec::new();
+        self.st
+            .q(q, args, |row| {
+                let author_id = row.int(7) as u64;
+                v.push(pages::CommentView {
+                    id: row.int(0) as u64,
+                    parent: row.int(1) as u64,
+                    author: row.text(2).into(),
+                    handle: row.text(3).into(),
+                    created_ms: row.int(5),
+                    deleted: row.int(6) != 0,
+                    can_delete: uid != 0 && (author_id == uid || moderator),
+                    body: crate::markdown::render(row.bytes(4)),
+                })
+            })
+            .map_err(db_code)?;
+        Ok(v)
+    }
+
+    /// THREADS_PAGE threads after thread id `after`, with their replies (at
+    /// most REPLIES_MAX); and where the next page starts, if there is one.
+    fn threads(&mut self, pid: u64, after: u64, uid: u64, moderator: bool) -> Result<(Vec<pages::CommentView>, Option<u64>), u16> {
+        let mut top = self.comment_rows(Q::Threads, &[Val::Int(pid as i64), Val::Int(after as i64), Val::Int(THREADS_PAGE + 1)], uid, moderator)?;
+        let more = top.len() > THREADS_PAGE as usize;
+        top.truncate(THREADS_PAGE as usize);
+        let (Some(a), Some(z)) = (top.first().map(|c| c.id), top.last().map(|c| c.id)) else { return Ok((top, None)) };
+        let replies = self.comment_rows(Q::Replies, &[Val::Int(pid as i64), Val::Int(a as i64), Val::Int(z as i64), Val::Int(REPLIES_MAX)], uid, moderator)?;
+        let mut all = top;
+        all.extend(replies);
+        all.sort_by_key(|c| c.id);
+        Ok((all, if more { Some(z) } else { None }))
+    }
+
+    /// The facts for a published post's comments: its id from the path,
+    /// may the viewer moderate.
+    fn public_post(&mut self, r: &R, id: &str) -> Result<(u64, bool), u16> {
+        let pid = Site::post_id(id)?;
+        let p = self.permit(r, 0, pid, Action::ReadPost { post: pid }).map_err(|_| 404u16)?;
+        let f = p.facts();
+        if !f.post.as_ref().is_some_and(|x| x.published) {
+            return Err(404);
+        }
+        Ok((pid, f.role.is_some()))
+    }
+
+    /// Comments after `after` as patches (each into its parent's replies, or
+    /// the thread), the cursor moved, and extra patches first.
+    fn comments_after(&mut self, r: &R, pid: u64, after: u64, moderator: bool, extra: &[(String, &'static str, Vec<u8>)], out: &mut Vec<u8>) -> Res {
+        let cs = self.comment_rows(Q::CommentsAfter, &[Val::Int(pid as i64), Val::Int(after as i64), Val::Int(200)], r.uid(), moderator)?;
+        let mut ps: Vec<(String, &'static str, Vec<u8>)> = extra.to_vec();
+        let mut last = after;
+        for c in &cs {
+            let mut h = H::new(String::new());
+            pages::comment_live(&mut h, c, r.signed_in());
+            let target = if c.parent == 0 { "#thread".to_string() } else { format!("#r{}", c.parent) };
+            ps.push((target, "append", h.b));
+            last = c.id;
+        }
+        let refs: Vec<(&str, &str, &[u8])> = ps.iter().map(|(a, b, c)| (a.as_str(), *b, c.as_slice())).collect();
+        // (_sending too: a sent comment's answer replaces the form whose
+        // request it is, so Datastar never gets to reset its indicator.)
+        let sig = format!("{{\"cafter\": {last}, \"_sending\": false}}");
+        resp::patches_signals(out, &refs, Some(&sig));
+        Ok(())
+    }
+
+    fn live(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
+        let (pid, moderator) = self.public_post(r, id)?;
+        let q = Form::parse(r.query.as_bytes()).ok_or(400u16)?;
+        let after = q.num("after").unwrap_or(0);
+        let n = q.num("n").unwrap_or(0);
+        let mut h = H::new(String::new());
+        pages::live(&mut h, pid, n + 1);
+        self.comments_after(r, pid, after, moderator, &[("#live".into(), "outer", h.b)], out)
+    }
+
+    fn more(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
+        let (pid, moderator) = self.public_post(r, id)?;
+        let after = Form::parse(r.query.as_bytes()).and_then(|q| q.num("after")).unwrap_or(0);
+        let (cs, more) = self.threads(pid, after, r.uid(), moderator)?;
+        let mut h = H::new(String::new());
+        h.r("<div class=\"cbatch\">");
+        pages::thread(&mut h, &cs, r.signed_in());
+        h.r("</div>");
+        let mut m = H::new(String::new());
+        if let Some(a) = more {
+            pages::more_comments(&mut m, pid, a);
+        }
+        if r.ds {
+            let mode = if more.is_some() { "outer" } else { "remove" };
+            resp::patches(out, &[("#more-comments", "before", &h.b), ("#more-comments", mode, &m.b)]);
+            return Ok(());
+        }
+        let s = r.signed_in();
+        self.html(r, out, 200, |p| {
+            pages::open(p, "Comments", s, false);
+            p.r("<section class=\"comments\" id=\"comments\"><div id=\"thread\">");
+            p.b.extend_from_slice(&h.b);
+            p.b.extend_from_slice(&m.b);
+            p.r("</div></section>");
+            pages::close(p);
+        });
+        Ok(())
+    }
+
+    fn reply(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
+        if !self.signed(r, out) {
+            return Ok(());
+        }
+        let cid = Site::post_id(id)?;
+        let mut c = None;
+        self.st.q(Q::CommentGet, &[Val::Int(cid as i64)], |row| c = Some(row.int(0) as u64)).map_err(db_code)?;
+        let pid = c.ok_or(404u16)?;
+        self.public_post(r, &pid.to_string())?;
+        let mut h = H::new(String::new());
+        pages::comment_box(&mut h, pid, cid, "rff", "Write a reply", r.ds);
+        if r.ds {
+            resp::patches(out, &[(&format!("#rf{cid}"), "inner", &h.b)]);
+            return Ok(());
+        }
+        let s = r.signed_in();
+        self.html(r, out, 200, |p| {
+            pages::open(p, "Reply", s, false);
+            p.r("<h1>Reply</h1>");
+            p.b.extend_from_slice(&h.b);
+            pages::close(p);
+        });
+        Ok(())
+    }
+
+    fn comment(&mut self, r: &mut R, id: &str, f: &Form, out: &mut Vec<u8>) -> Res {
+        let pid = Site::post_id(id)?;
+        let body = f.text("body", COMMENT_MAX, true).ok_or(400u16)?.replace("\r\n", "\n");
+        let parent = f.num("parent").unwrap_or(0);
+        let p = self.permit(r, 0, pid, Action::Comment { post: pid })?;
+        let moderator = p.facts().role.is_some();
+        let (uid, now) = (r.uid(), r.now());
+        let cid = self
+            .st
+            .write(&p, now, true, |st, _| {
+                let root = if parent == 0 {
+                    None
+                } else {
+                    let mut got = None;
+                    st.q(Q::CommentGet, &[Val::Int(parent as i64)], |row| got = Some((row.int(0) as u64, row.int(2))))?;
+                    match got {
+                        Some((post, root)) if post == pid => Some(root),
+                        _ => return Err(No::Bad),
+                    }
+                };
+                let par = if parent == 0 { Val::Null } else { Val::Int(parent as i64) };
+                let rt = root.map_or(Val::Null, Val::Int);
+                st.run(Q::CommentNew, &[Val::Int(pid as i64), par, rt, Val::Int(uid as i64), Val::Text(body.as_bytes()), Val::Int(now as i64)])?;
+                let cid = st.db.last_rowid();
+                st.run(Q::CommentCount, &[Val::Int(pid as i64), Val::Int(1)])?;
+                Ok(cid)
+            })
+            .map_err(no_code)?;
+        if r.ds {
+            // The box emptied (a reply's closed), then everything new.
+            let mut h = H::new(String::new());
+            let extra = if parent == 0 {
+                pages::comment_box(&mut h, pid, 0, "cform", "Write a comment", false);
+                vec![("#cform".to_string(), "replace", h.b)]
+            } else {
+                vec![(format!("#rf{parent}"), "inner", Vec::new())]
+            };
+            let after = f.num("after").unwrap_or(0);
+            return self.comments_after(r, pid, after, moderator, &extra, out);
+        }
+        let back = self.post_url(pid)?;
+        resp::redirect(out, &format!("{back}#c{cid}"), b"");
+        Ok(())
+    }
+
+    fn post_url(&mut self, pid: u64) -> Result<String, u16> {
+        let mut u = None;
+        self.st.q(Q::EditGet, &[Val::Int(pid as i64)], |row| u = Some(format!("/b/{}/{}", row.text(3), row.text(1)))).map_err(db_code)?;
+        u.ok_or(404)
+    }
+
+    fn delete_comment(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
+        let cid = Site::post_id(id)?;
+        let mut c = None;
+        self.st.q(Q::CommentGet, &[Val::Int(cid as i64)], |row| c = Some((row.int(0) as u64, row.int(1) as u64))).map_err(db_code)?;
+        let (pid, author) = c.ok_or(404u16)?;
+        let p = self.permit(r, 0, pid, Action::DeleteComment { post: pid, author })?;
+        self.st
+            .write(&p, r.now(), true, |st, _| {
+                // The author the permit was decided on, still.
+                let mut now_author = None;
+                st.q(Q::CommentGet, &[Val::Int(cid as i64)], |row| now_author = Some(row.int(1) as u64))?;
+                if now_author != Some(author) {
+                    return Err(No::Denied);
+                }
+                if st.run(Q::CommentDel, &[Val::Int(cid as i64)])? == 1 {
+                    st.run(Q::CommentCount, &[Val::Int(pid as i64), Val::Int(-1)])?;
+                }
+                Ok(())
+            })
+            .map_err(no_code)?;
+        if r.ds {
+            resp::patches(out, &[(&format!("#cb{cid}"), "inner", b"<p class=\"muted\">[deleted]</p>"), (&format!("#ca{cid} details.del"), "remove", b"")]);
+            return Ok(());
+        }
+        let back = self.post_url(pid)?;
+        resp::redirect(out, &format!("{back}#c{cid}"), b"");
+        Ok(())
+    }
+
+    fn like(&mut self, r: &mut R, id: &str, f: &Form, out: &mut Vec<u8>) -> Res {
+        let pid = Site::post_id(id)?;
+        let on = f.get("on") != Some("0");
+        let p = self.permit(r, 0, pid, Action::Like { post: pid })?;
+        let (uid, now) = (r.uid(), r.now());
+        self.st
+            .write(&p, now, true, |st, _| {
+                let changed = if on {
+                    st.run(Q::LikeAdd, &[Val::Int(pid as i64), Val::Int(uid as i64), Val::Int(now as i64)])?
+                } else {
+                    st.run(Q::LikeDel, &[Val::Int(pid as i64), Val::Int(uid as i64)])?
+                };
+                if changed == 1 {
+                    st.run(Q::LikeCount, &[Val::Int(pid as i64), Val::Int(if on { 1 } else { -1 })])?;
+                }
+                Ok(())
+            })
+            .map_err(no_code)?;
+        if r.ds {
+            let (likes, count) = self.social_counts(pid)?;
+            let liked = self.st.one(Q::Liked, &[Val::Int(pid as i64), Val::Int(uid as i64)]).map_err(db_code)?.is_some();
+            let mut h = H::new(String::new());
+            pages::social(&mut h, true, pid, likes, liked, count);
+            resp::patches(out, &[("", "", &h.b)]);
+            return Ok(());
+        }
+        let back = self.post_url(pid)?;
+        resp::redirect(out, &back, b"");
+        Ok(())
+    }
+
+    // IMAGES: sent by the editor (resized there), kept by an unguessable
+    // key, served as what their first bytes say they are.
+    fn upload(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
+        let pid = Site::post_id(id)?;
+        let b = r.req.body;
+        let ctype = image_type(b).ok_or(415u16)?;
+        if b.len() > IMAGE_MAX {
+            return Err(413);
+        }
+        let p = self.permit(r, 0, pid, Action::EditPost { post: pid })?;
+        let key = hex(&r.random::<16>());
+        let (uid, now) = (r.uid(), r.now());
+        self.st
+            .write(&p, now, true, |st, _| Ok(st.run(Q::ImageNew, &[Val::Text(key.as_bytes()), Val::Int(pid as i64), Val::Int(uid as i64), Val::Text(ctype.as_bytes()), Val::Blob(b), Val::Int(now as i64)])?))
+            .map_err(no_code)?;
+        Site::text(out, 200, format!("/img/{key}").as_bytes(), b"");
+        Ok(())
+    }
+
+    fn image(&mut self, r: &mut R, key: &str, out: &mut Vec<u8>) -> Res {
+        if key.len() != 32 || !key.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+            return Err(404);
+        }
+        let mut img = None;
+        self.st.q(Q::ImageGet, &[Val::Text(key.as_bytes())], |row| img = Some((row.text(0).to_string(), row.bytes(1).to_vec()))).map_err(db_code)?;
+        let (ctype, bytes) = img.ok_or(404u16)?;
+        // (The type is re-derived from the bytes: what is served matches them.)
+        let t = image_type(&bytes).ok_or(404u16)?;
+        debug_assert_eq!(t, ctype);
+        resp::whole(out, 200, t, Cache::Immutable, None, b"", &bytes, !r.head_only);
+        Ok(())
+    }
+
     /// Expired challenges, links and sessions: removed once a minute.
     fn sweep(&mut self, now: u64) {
         if now < self.swept_ms + 60_000 {
@@ -1123,6 +1432,21 @@ fn txn<T>(st: &mut Store, f: impl FnOnce(&mut Store) -> Result<T, u16>) -> Resul
             let _ = st.run(Q::Rollback, &[]);
             Err(e)
         }
+    }
+}
+
+/// An image's type from its first bytes (JPEG, PNG, GIF, WebP), or None.
+fn image_type(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.len() >= 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
     }
 }
 

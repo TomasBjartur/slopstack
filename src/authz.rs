@@ -81,6 +81,9 @@ pub fn permitted_exec(f: &Facts, a: Action) -> (r: bool)
         Action::DeletePost { post } => can_write_post_exec(f, post),
         Action::ReadPost { post } => post_public_exec(f, post) || can_write_post_exec(f, post),
         Action::ReadBlogAdmin { blog } => member_of_exec(f, blog),
+        Action::Comment { post } => f.who != 0 && post_public_exec(f, post),
+        Action::Like { post } => f.who != 0 && post_public_exec(f, post),
+        Action::DeleteComment { post, author } => f.who != 0 && (author == f.who || can_write_post_exec(f, post)),
     }
 }
 
@@ -188,6 +191,24 @@ pub proof fn writers_are_members_of_the_posts_blog(f: Facts, a: Action)
         f.who != 0,
         f.role.is_some(),
         f.post matches Some(x) && x.blog == f.blog,
+{
+}
+
+/// Nobody comments on or likes a draft.
+pub proof fn no_comments_or_likes_on_drafts(f: Facts, a: Action)
+    requires
+        permitted(f, a),
+        a matches Action::Comment { .. } || a matches Action::Like { .. },
+    ensures
+        f.who != 0,
+        f.post matches Some(x) && x.published,
+{
+}
+
+/// Someone else's comment is deleted only by an author of the post's blog.
+pub proof fn only_moderators_delete_others_comments(f: Facts, post: u64, author: u64)
+    requires permitted(f, Action::DeleteComment { post, author }), author != f.who,
+    ensures f.role.is_some(), f.post matches Some(x) && x.id == post && x.blog == f.blog,
 {
 }
 

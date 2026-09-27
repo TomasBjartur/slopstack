@@ -40,6 +40,10 @@ pub enum Action {
     DeletePost { post: u64 },
     ReadPost { post: u64 },
     ReadBlogAdmin { blog: u64 },
+    Comment { post: u64 },
+    /// author: the comment's author, as loaded (re-read by the delete).
+    DeleteComment { post: u64, author: u64 },
+    Like { post: u64 },
 }
 
 pub open spec fn is_user(f: Facts) -> bool {
@@ -92,6 +96,14 @@ pub open spec fn permitted(f: Facts, a: Action) -> bool {
         // Anyone reads a published post; members also read drafts.
         Action::ReadPost { post } => post_public(f, post) || can_write_post(f, post),
         Action::ReadBlogAdmin { blog } => member_of(f, blog),
+        // SECURITY DECISION (2026-09-27): comments and likes. Any signed-in
+        // user may comment on and like a published post (never a draft).
+        Action::Comment { post } => is_user(f) && post_public(f, post),
+        Action::Like { post } => is_user(f) && post_public(f, post),
+        // A comment is deleted by its author, or by an author of the blog
+        // (moderation).
+        Action::DeleteComment { post, author } =>
+            is_user(f) && (author == f.who || can_write_post(f, post)),
     }
 }
 

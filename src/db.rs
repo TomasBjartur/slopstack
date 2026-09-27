@@ -97,6 +97,8 @@ pub const MIGRATIONS: &[&str] = &[
        -- out for it (1 is the server's: src/crdt.rs SERVER_REP).
        edited_ms INTEGER NOT NULL DEFAULT 0,
        reps INTEGER NOT NULL DEFAULT 1,
+       like_count INTEGER NOT NULL DEFAULT 0,
+       comment_count INTEGER NOT NULL DEFAULT 0,
        UNIQUE (blog_id, slug)
      ) STRICT;
      CREATE INDEX post_recent ON post(published, published_ms);
@@ -121,6 +123,38 @@ pub const MIGRATIONS: &[&str] = &[
        upto INTEGER NOT NULL,
        data BLOB NOT NULL,
        size INTEGER NOT NULL
+     ) STRICT;
+     -- Comments: threads (parent NULL) and replies (root: the thread's
+     -- first comment). The text is Markdown, rendered on read (proved
+     -- markup). A deleted comment keeps its place (its replies stay).
+     CREATE TABLE comment (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       post_id INTEGER NOT NULL REFERENCES post(id) ON DELETE CASCADE,
+       parent_id INTEGER REFERENCES comment(id) ON DELETE CASCADE,
+       root_id INTEGER,
+       author_id INTEGER REFERENCES user(id) ON DELETE SET NULL,
+       body_md TEXT NOT NULL CHECK (length(body_md) <= 10000),
+       created_ms INTEGER NOT NULL,
+       deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1))
+     ) STRICT;
+     CREATE INDEX comment_threads ON comment(post_id, parent_id, id);
+     CREATE INDEX comment_roots ON comment(post_id, root_id, id);
+     CREATE TABLE post_like (
+       post_id INTEGER NOT NULL REFERENCES post(id) ON DELETE CASCADE,
+       user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+       created_ms INTEGER NOT NULL,
+       PRIMARY KEY (post_id, user_id)
+     ) STRICT, WITHOUT ROWID;
+     -- Images in posts, by an unguessable key; only the types a browser
+     -- shows as images, checked by their first bytes too.
+     CREATE TABLE image (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       key TEXT NOT NULL UNIQUE CHECK (length(key) = 32),
+       post_id INTEGER NOT NULL REFERENCES post(id) ON DELETE CASCADE,
+       author_id INTEGER REFERENCES user(id) ON DELETE SET NULL,
+       type TEXT NOT NULL CHECK (type IN ('image/jpeg', 'image/png', 'image/gif', 'image/webp')),
+       bytes BLOB NOT NULL CHECK (length(bytes) BETWEEN 1 AND 2097152),
+       created_ms INTEGER NOT NULL
      ) STRICT;
      -- Writes per user per minute (spec/authz.rs WRITES_PER_MINUTE).
      CREATE TABLE write_budget (
@@ -226,6 +260,21 @@ queries! {
     OpsCount => "SELECT coalesce(sum(length(data)), 0), count(*) FROM doc_ops WHERE post_id = ?1 AND seq > ?2",
     SnapGet => "SELECT upto, data FROM doc_snap WHERE post_id = ?1",
     SnapPut => "INSERT INTO doc_snap(post_id, upto, data, size) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(post_id) DO UPDATE SET upto = ?2, data = ?3, size = ?4",
+    CommentNew => "INSERT INTO comment(post_id, parent_id, root_id, author_id, body_md, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    CommentGet => "SELECT post_id, coalesce(author_id, 0), coalesce(root_id, id), deleted FROM comment WHERE id = ?1",
+    CommentDel => "UPDATE comment SET deleted = 1, body_md = '' WHERE id = ?1 AND deleted = 0",
+    CommentCount => "UPDATE post SET comment_count = comment_count + ?2 WHERE id = ?1",
+    Threads => "SELECT c.id, coalesce(c.parent_id, 0), coalesce(u.name, ''), coalesce(u.handle, ''), c.body_md, c.created_ms, c.deleted, coalesce(c.author_id, 0) FROM comment c LEFT JOIN user u ON u.id = c.author_id WHERE c.post_id = ?1 AND c.parent_id IS NULL AND c.id > ?2 ORDER BY c.id LIMIT ?3",
+    Replies => "SELECT c.id, coalesce(c.parent_id, 0), coalesce(u.name, ''), coalesce(u.handle, ''), c.body_md, c.created_ms, c.deleted, coalesce(c.author_id, 0) FROM comment c LEFT JOIN user u ON u.id = c.author_id WHERE c.post_id = ?1 AND c.root_id BETWEEN ?2 AND ?3 ORDER BY c.id LIMIT ?4",
+    CommentsAfter => "SELECT c.id, coalesce(c.parent_id, 0), coalesce(u.name, ''), coalesce(u.handle, ''), c.body_md, c.created_ms, c.deleted, coalesce(c.author_id, 0) FROM comment c LEFT JOIN user u ON u.id = c.author_id WHERE c.post_id = ?1 AND c.id > ?2 ORDER BY c.id LIMIT ?3",
+    LastComment => "SELECT coalesce(max(id), 0) FROM comment WHERE post_id = ?1",
+    LikeAdd => "INSERT INTO post_like(post_id, user_id, created_ms) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+    LikeDel => "DELETE FROM post_like WHERE post_id = ?1 AND user_id = ?2",
+    LikeCount => "UPDATE post SET like_count = like_count + ?2 WHERE id = ?1",
+    Liked => "SELECT 1 FROM post_like WHERE post_id = ?1 AND user_id = ?2",
+    Social => "SELECT like_count, comment_count FROM post WHERE id = ?1",
+    ImageNew => "INSERT INTO image(key, post_id, author_id, type, bytes, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    ImageGet => "SELECT type, bytes FROM image WHERE key = ?1",
     Sweep => "DELETE FROM challenge WHERE expires_ms < ?1",
     SweepTokens => "DELETE FROM email_token WHERE expires_ms < ?1",
     SweepSessions => "DELETE FROM session WHERE expires_ms < ?1",

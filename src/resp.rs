@@ -30,6 +30,7 @@ fn reason(code: u16) -> &'static str {
         405 => "Method Not Allowed",
         409 => "Conflict",
         413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         429 => "Too Many Requests",
         503 => "Service Unavailable",
         _ => "Error",
@@ -120,6 +121,12 @@ pub fn cookie(token_hex: Option<&str>, secure: bool) -> Vec<u8> {
 /// Datastar events: each (selector, mode, html) patches the page. The HTML
 /// is ours (templates), one data: elements line per line.
 pub fn patches(out: &mut Vec<u8>, ps: &[(&str, &str, &[u8])]) {
+    patches_signals(out, ps, None)
+}
+
+/// As patches, then (signals) a JSON object of signals to set (numbers
+/// the server wrote).
+pub fn patches_signals(out: &mut Vec<u8>, ps: &[(&str, &str, &[u8])], signals: Option<&str>) {
     let mut b: Vec<u8> = Vec::new();
     for (sel, mode, html) in ps {
         b.extend_from_slice(b"event: datastar-patch-elements\n");
@@ -139,6 +146,11 @@ pub fn patches(out: &mut Vec<u8>, ps: &[(&str, &str, &[u8])]) {
             b.push(b'\n');
         }
         b.push(b'\n');
+    }
+    if let Some(sg) = signals {
+        b.extend_from_slice(b"event: datastar-patch-signals\ndata: signals ");
+        b.extend_from_slice(sg.as_bytes());
+        b.extend_from_slice(b"\n\n");
     }
     whole(out, 200, "text/event-stream", Cache::NoStore, None, b"", &b, true);
 }

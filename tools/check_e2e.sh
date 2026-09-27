@@ -15,6 +15,7 @@ run python3 tests/app_test.py
 run python3 tests/passkey_test.py
 run python3 tests/sync_test.py
 run python3 tests/redteam_test.py
+run python3 tests/social_test.py
 run python3 tests/workers_test.py
 run python3 tests/browser_test.py
 run python3 tests/collab_test.py

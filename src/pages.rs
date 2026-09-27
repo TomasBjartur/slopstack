@@ -4,7 +4,10 @@
 // escaped by html::escape (proved: no < > " & left). Stored posts are
 // rendered by markdown::render into Markup (proved allowed markup).
 // data-* attributes are code to Datastar: only template text writes them,
-// with server-written ids and slugs (escaped) inside.
+// with server-written ids and slugs (escaped) inside. Every action a user
+// may repeat carries k=Date.now(): Datastar 1.0.4 does not send a second
+// request to a URL it has sent one to from the same element (found by
+// tests/social_test.py; the server ignores k).
 use crate::html::{escape, Markup};
 
 pub struct H {
@@ -226,7 +229,18 @@ pub struct PostView<'a> {
     pub just_published: bool,
 }
 
-pub fn post(h: &mut H, signed_in: bool, v: &PostView, body: &Markup) {
+/// A published post's likes and comments: (likes, liked by the viewer,
+/// comment count), the first threads, where more start, the last id.
+pub struct Social<'a> {
+    pub likes: i64,
+    pub liked: bool,
+    pub count: i64,
+    pub comments: &'a [CommentView],
+    pub more_after: Option<u64>,
+    pub last: u64,
+}
+
+pub fn post(h: &mut H, signed_in: bool, v: &PostView, body: &Markup, social_: Option<&Social>) {
     open(h, v.title, signed_in, false);
     if v.just_published {
         h.r("<p class=\"notice\" role=\"status\">Your post is live. Share its address: readers see it now.</p>");
@@ -241,7 +255,14 @@ pub fn post(h: &mut H, signed_in: bool, v: &PostView, body: &Markup) {
     if v.can_edit {
         h.r("<span class=\"actions\"><a class=\"btn\" href=\"/edit/").n(v.id).r("\">Edit</a></span>");
     }
-    h.r("</div></header><div class=\"body\">").m(body).r("</div><footer><a href=\"/b/").t(v.blog_slug).r("\">← More from ").t(v.blog_title).r("</a><a href=\"/\">Recent posts</a></footer></article>");
+    h.r("</div></header><div class=\"body\">").m(body).r("</div>");
+    if let Some(sc) = social_ {
+        social(h, signed_in, v.id, sc.likes, sc.liked, sc.count);
+    }
+    h.r("<footer><a href=\"/b/").t(v.blog_slug).r("\">← More from ").t(v.blog_title).r("</a><a href=\"/\">Recent posts</a></footer></article>");
+    if let Some(sc) = social_ {
+        comments(h, signed_in, v.id, sc.comments, sc.more_after, sc.last);
+    }
     close(h);
 }
 
@@ -340,7 +361,7 @@ pub fn people(h: &mut H, slug: &str, is_owner: bool, authors: &[Author]) {
     for a in authors {
         h.r("<li><span><strong>").t(&a.name).r("</strong><br><span class=\"meta\">").r(if a.owner { "Owner" } else { "Author" }).r("<span class=\"dot\"></span>").t(&a.email).r("</span></span>");
         if is_owner && !a.owner {
-            h.r("<form method=\"post\" action=\"/dash/").t(slug).r("/authors/").n(a.id as u64).r("/remove\" data-confirm=\"Remove ").t(&a.name).r(" from this blog? They will no longer be able to write or edit here.\" data-ok=\"Remove\" data-on:submit=\"@post('/dash/").t(slug).r("/authors/").n(a.id as u64).r("/remove?frag=1', {contentType: 'form'})\"><button class=\"danger\">Remove</button></form>");
+            h.r("<form method=\"post\" action=\"/dash/").t(slug).r("/authors/").n(a.id as u64).r("/remove\" data-confirm=\"Remove ").t(&a.name).r(" from this blog? They will no longer be able to write or edit here.\" data-ok=\"Remove\" data-on:submit=\"@post('/dash/").t(slug).r("/authors/").n(a.id as u64).r("/remove?k=' + Date.now(), {contentType: 'form'})\"><button class=\"danger\">Remove</button></form>");
         }
         h.r("</li>");
     }
@@ -372,7 +393,7 @@ pub fn dash_blog(h: &mut H, slug: &str, title: &str, is_owner: bool, posts: &[Po
     h.r("</section><aside><h2>Authors</h2>");
     people(h, slug, is_owner, authors);
     if is_owner {
-        h.r("<form id=\"add-author\" method=\"post\" action=\"/dash/").t(slug).r("/authors\" class=\"stack add-author\" data-on:submit=\"@post('/dash/").t(slug).r("/authors?frag=1', {contentType: 'form'})\" data-indicator:_adding><label>Add a co-author <span class=\"hint\">They need an account first.</span><input name=\"email\" type=\"email\" required placeholder=\"their@email.com\"></label><p class=\"form-note meta\" id=\"add-author-note\" aria-live=\"polite\">").t(note).r("</p><div><button data-attr:disabled=\"$_adding\">Add author</button></div></form>");
+        h.r("<form id=\"add-author\" method=\"post\" action=\"/dash/").t(slug).r("/authors\" class=\"stack add-author\" data-on:submit=\"@post('/dash/").t(slug).r("/authors?k=' + Date.now(), {contentType: 'form'})\" data-indicator:_adding><label>Add a co-author <span class=\"hint\">They need an account first.</span><input name=\"email\" type=\"email\" required placeholder=\"their@email.com\"></label><p class=\"form-note meta\" id=\"add-author-note\" aria-live=\"polite\">").t(note).r("</p><div><button data-attr:disabled=\"$_adding\">Add author</button></div></form>");
         h.r("<form method=\"post\" action=\"/dash/").t(slug).r("/delete\" class=\"danger-zone\" data-confirm=\"Delete this blog and all its posts? This cannot be undone.\" data-ok=\"Delete\"><button class=\"danger\">Delete blog</button></form>");
     }
     h.r("</aside></div>");
@@ -408,7 +429,168 @@ pub fn edit(h: &mut H, v: &EditView) {
     }
     h.r("</div></header><main id=\"main\"><form id=\"post-form\" method=\"post\" action=\"/edit/").n(v.id).r("\" class=\"wrap write editor\"><textarea class=\"title\" name=\"title\" rows=\"1\" required maxlength=\"200\" placeholder=\"Title\" aria-label=\"Title\">&#10;").t(v.title).r("</textarea><div class=\"edit-tools\" id=\"edit-tools\"></div><textarea id=\"editor\" class=\"text\" ").r(if v.big { "readonly data-big=\"1\" " } else { "name=\"body\" " }).r("placeholder=\"Tell your story…\" aria-label=\"Text\" data-published=\"").r(if v.published { "1" } else { "0" }).r("\" data-post=\"").n(v.id).r("\" data-rep=\"").n(v.rep as u64).r("\" data-wasm=\"");
     asset(h, "app.wasm");
-    h.r("\">&#10;").t(v.body).r("</textarea><p class=\"help\">Markdown (CommonMark): <code>## Heading</code> <code>**bold**</code> <code>*italic*</code> <code>[link](https://…)</code> <code>- list</code> <code>&gt; quote</code>. Your text syncs as you type; Ctrl+S or ⌘S saves.</p></form><div class=\"wrap danger-zone\"><form method=\"post\" action=\"/edit/").n(v.id).r("/delete\" data-confirm=\"Delete this post? This cannot be undone.\"><button class=\"danger\">Delete post</button></form></div></main><script type=\"module\" src=\"");
+    h.r("\">&#10;").t(v.body).r("</textarea><p class=\"help\"><button type=\"button\" id=\"image-add\" class=\"link\">Add an image</button> (or paste or drop one). <input type=\"file\" id=\"image-pick\" accept=\"image/*\" hidden> Markdown (CommonMark): <code>## Heading</code> <code>**bold**</code> <code>*italic*</code> <code>[link](https://…)</code> <code>- list</code> <code>&gt; quote</code>. Your text syncs as you type; Ctrl+S or ⌘S saves.</p></form><div class=\"wrap danger-zone\"><form method=\"post\" action=\"/edit/").n(v.id).r("/delete\" data-confirm=\"Delete this post? This cannot be undone.\"><button class=\"danger\">Delete post</button></form></div></main><script type=\"module\" src=\"");
     asset(h, "editor.js");
     h.r("\"></script></body></html>\n");
+}
+
+// SOCIAL: likes and comments on a published post (Datastar: a like shows
+// at once from local signals, then the server's bar says what is true;
+// comments arrive live). data-* expressions hold only numbers the server
+// wrote (ids, counts).
+pub fn social(h: &mut H, signed_in: bool, pid: u64, likes: i64, liked: bool, comments: i64) {
+    h.r("<div class=\"social\" id=\"social\">");
+    if signed_in {
+        h.r("<form method=\"post\" action=\"/like/").n(pid).r("\" data-signals=\"{_lk: ").r(if liked { "true" } else { "false" }).r(", _ln: ").n(likes.max(0) as u64)
+            .r("}\" data-on:submit=\"$_liking || ($_lk = !$_lk, $_ln = $_ln + ($_lk ? 1 : -1), el.elements.on.value = $_lk ? '1' : '0', @post('/like/").n(pid)
+            .r("?k=' + Date.now(), {contentType: 'form'}))\" data-indicator:_liking><input type=\"hidden\" name=\"on\" value=\"").r(if liked { "0" } else { "1" })
+            .r(if liked { "\"><button class=\"like on\" aria-pressed=\"true\" title=\"Unlike\"" } else { "\"><button class=\"like\" aria-pressed=\"false\" title=\"Like\"" })
+            .r(" data-class:on=\"$_lk\" data-attr:aria-pressed=\"$_lk ? 'true' : 'false'\" data-attr:title=\"$_lk ? 'Unlike' : 'Like'\">♥ <span data-text=\"$_ln\">").n(likes.max(0) as u64).r("</span></button></form>");
+    } else {
+        h.r("<a class=\"btn like\" href=\"/login\" title=\"Log in to like\">♥ ").n(likes.max(0) as u64).r("</a>");
+    }
+    h.r("<a class=\"btn quiet\" href=\"#comments\">").n(comments.max(0) as u64).r(if comments == 1 { " comment" } else { " comments" }).r("</a></div>");
+}
+
+pub struct CommentView {
+    pub id: u64,
+    pub parent: u64,
+    pub author: String,
+    pub handle: String,
+    pub created_ms: i64,
+    pub deleted: bool,
+    /// The viewer may delete it (its author, or a moderator).
+    pub can_delete: bool,
+    pub body: Markup,
+}
+
+/// Replies nest to this depth on screen (deeper ones join the last level).
+const NEST_MAX: usize = 4;
+
+fn comment_open(h: &mut H, c: &CommentView, fresh: bool) {
+    h.r(if fresh { "<div class=\"comment fresh\" id=\"c" } else { "<div class=\"comment\" id=\"c" }).n(c.id).r("\" data-parent=\"").n(c.parent).r("\"><div class=\"meta\">");
+    if c.handle.is_empty() {
+        h.t(&c.author);
+    } else {
+        h.r("<a href=\"/u/").t(&c.handle).r("\">").t(&c.author).r("</a>");
+    }
+    h.r("<span class=\"dot\"></span><a href=\"#c").n(c.id).r("\">");
+    date(h, c.created_ms);
+    h.r("</a></div><div class=\"cbody\" id=\"cb").n(c.id).r("\">");
+    if c.deleted {
+        h.r("<p class=\"muted\">[deleted]</p>");
+    } else {
+        h.m(&c.body);
+    }
+    h.r("</div>");
+}
+
+fn comment_actions(h: &mut H, c: &CommentView, signed_in: bool) {
+    h.r("<div class=\"cactions\" id=\"ca").n(c.id).r("\">");
+    if signed_in {
+        h.r("<a href=\"/reply/").n(c.id).r("\" data-on:click__prevent=\"@get('/reply/").n(c.id).r("?k=' + Date.now())\">Reply</a>");
+    }
+    if c.can_delete && !c.deleted {
+        h.r("<details class=\"del\"><summary>Delete</summary><form method=\"post\" action=\"/comment/").n(c.id).r("/delete\" data-on:submit=\"@post('/comment/").n(c.id)
+            .r("/delete?k=' + Date.now(), {contentType: 'form'})\"><button class=\"danger\">Delete this comment</button></form></details>");
+    }
+    h.r("</div><div class=\"rf\" id=\"rf").n(c.id).r("\"></div>");
+}
+
+/// Comments in thread order, nested (cs: threads and their replies, in id
+/// order; a reply's parent comes before it).
+pub fn thread(h: &mut H, cs: &[CommentView], signed_in: bool) {
+    use std::collections::HashMap;
+    let mut kids: HashMap<u64, Vec<usize>> = HashMap::new();
+    let ids: std::collections::HashSet<u64> = cs.iter().map(|c| c.id).collect();
+    let mut roots = vec![];
+    for (i, c) in cs.iter().enumerate() {
+        if c.parent == 0 || !ids.contains(&c.parent) {
+            roots.push(i);
+        } else {
+            kids.entry(c.parent).or_default().push(i);
+        }
+    }
+    // Explicit stack (no recursion): Open(i, depth) or Close.
+    enum F {
+        Open(usize, usize),
+        Close,
+    }
+    let mut stack: Vec<F> = roots.iter().rev().map(|&i| F::Open(i, 0)).collect();
+    while let Some(f) = stack.pop() {
+        match f {
+            F::Close => {
+                h.r("</details></div>");
+            }
+            F::Open(i, d) => {
+                let c = &cs[i];
+                comment_open(h, c, false);
+                comment_actions(h, c, signed_in);
+                let ks = kids.get(&c.id).map_or(&[][..], |v| &v[..]);
+                if ks.is_empty() {
+                    h.r("<details class=\"replies\" id=\"r").n(c.id).r("\" open><summary class=\"none\"></summary>");
+                } else {
+                    h.r("<details class=\"replies\" id=\"r").n(c.id).r("\" open><summary>").n(ks.len() as u64).r(if ks.len() == 1 { " reply" } else { " replies" }).r("</summary>");
+                }
+                stack.push(F::Close);
+                for &k in ks.iter().rev() {
+                    stack.push(F::Open(k, (d + 1).min(NEST_MAX)));
+                }
+            }
+        }
+    }
+}
+
+/// One comment arriving live (appended to its parent's replies).
+pub fn comment_live(h: &mut H, c: &CommentView, signed_in: bool) {
+    comment_open(h, c, true);
+    comment_actions(h, c, signed_in);
+    h.r("<details class=\"replies\" id=\"r").n(c.id).r("\" open><summary class=\"none\"></summary></details></div>");
+}
+
+/// The comment box (parent 0: a new thread).
+pub fn comment_box(h: &mut H, pid: u64, parent: u64, id: &'static str, label: &'static str, cancel: bool) {
+    h.r("<form id=\"").r(id);
+    if parent != 0 {
+        h.n(parent);
+    }
+    h.r("\" method=\"post\" action=\"/comment/").n(pid).r("\" class=\"stack cform\" data-on:submit=\"@post('/comment/").n(pid)
+        .r("?k=' + Date.now(), {contentType: 'form'})\" data-indicator:_sending><input type=\"hidden\" name=\"after\" data-bind:cafter><input type=\"hidden\" name=\"parent\" value=\"").n(parent)
+        .r("\"><textarea name=\"body\" required maxlength=\"10000\" rows=\"3\" placeholder=\"").r(label).r("…\" aria-label=\"").r(label)
+        .r("\"></textarea><div class=\"row\"><button class=\"primary\" data-attr:disabled=\"$_sending\">Send</button>");
+    if cancel {
+        h.r("<button type=\"button\" class=\"quiet\" data-on:click=\"document.getElementById('rf").n(parent).r("').replaceChildren()\">Cancel</button>");
+    }
+    h.r("</div></form>");
+}
+
+/// The element that keeps comments coming: each answer replaces it with
+/// the next request (after: the last comment shown; delay: wait first).
+/// (The last comment shown is the signal cafter: live answers and sent
+/// comments both bring everything after it, and move it.)
+pub fn live(h: &mut H, pid: u64, n: u64) {
+    h.r("<div id=\"live\" data-init__delay.10s=\"@get('/live/").n(pid).r("?n=").n(n)
+        .r("&amp;after=' + $cafter, {requestCancellation: 'cleanup'})\"></div>");
+}
+
+pub fn more_comments(h: &mut H, pid: u64, after: u64) {
+    h.r("<div id=\"more-comments\" class=\"more-comments\"><a class=\"btn\" href=\"/comments/").n(pid).r("?after=").n(after)
+        .r("\" data-on:click__prevent=\"@get('/comments/").n(pid).r("?after=").n(after).r("')\" data-indicator:_morec data-attr:aria-busy=\"$_morec\">More comments</a></div>");
+}
+
+/// The comments section of a post page.
+pub fn comments(h: &mut H, signed_in: bool, pid: u64, cs: &[CommentView], more_after: Option<u64>, last: u64) {
+    h.r("<section class=\"comments\" id=\"comments\" data-signals:cafter=\"").n(last).r("\"><h2>Comments</h2>");
+    if signed_in {
+        comment_box(h, pid, 0, "cform", "Write a comment", false);
+    } else {
+        h.r("<p class=\"muted\"><a href=\"/login\">Log in</a> or <a href=\"/signup\">sign up</a> to comment.</p>");
+    }
+    live(h, pid, 0);
+    h.r("<div id=\"thread\">");
+    thread(h, cs, signed_in);
+    if let Some(a) = more_after {
+        more_comments(h, pid, a);
+    }
+    h.r("</div></section>");
 }

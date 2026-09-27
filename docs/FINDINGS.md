@@ -95,10 +95,20 @@ version, found the two worst bugs in this one within minutes.
 - **The model proof is about sets, so it is easy**; the hard part (the
   efficient code equals the model) is tested, not proved. Proving the run
   structure's in-order walk equal to the model in Verus is future work.
+- **One very long paragraph is slow to type in: the 10x rule fails here.**
+  The editor's view keeps only a window of the text in the textarea, cut
+  at line breaks. A 300 KB paragraph with no line break sits in the
+  textarea whole, and the browser's own work costs 155-192 ms a key
+  (tests/usability_test.py measures it). Our imagined worst paragraph is
+  150 KB, so the 10x case, 1.5 MB, would be worse. The fix is to cut the
+  window inside long lines as well; it is not done yet.
 - **Real-time is polling** (0.4 s while others type, 1.5 s otherwise),
   not push: simple across worker processes; latency is visible.
 - **Left behind in the conversion from the first version**: comments,
   likes, images, tags, schedules, custom domains (not in this version's v1).
+- **Kani is not used yet.** The design planned bounded model checking of
+  `src/sys/` (the `unsafe` syscall and FFI wrappers). They are small and
+  exercised by every test, but not model-checked.
 - **Per-worker rate limits** (login challenges, editor page loads) are per
   process: with N workers the limit is N times higher.
 

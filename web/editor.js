@@ -18,7 +18,7 @@
 import { Doc, ready, memoryBytes } from "./crdt.js";
 import { View, diff } from "./view.js";
 import { History } from "./history.js";
-import { setupModes } from "./modes.js";
+import { setupModes, altOf } from "./modes.js";
 
 const SYNC_MS = 1500;       // polling while nothing happens
 const FAST_MS = 400;        // polling while others are typing
@@ -282,10 +282,95 @@ function start(ta) {
     },
     undo,
     redo,
-    // Images are not in this version.
-    upload: async () => null,
+    upload: uploadImage,
     show,
   });
+
+  // IMAGES: chosen, pasted or dropped. Resized here (at most 1600 px,
+  // JPEG) to fit the server's 2 MiB; re-encoding also drops EXIF data such
+  // as GPS positions. A small GIF is sent as it is.
+  const pick = document.getElementById("image-pick");
+  const addBtn = document.getElementById("image-add");
+  if (addBtn && pick) {
+    addBtn.addEventListener("click", () => pick.click());
+    pick.addEventListener("change", () => {
+      for (const f of pick.files) upload(f);
+      pick.value = "";
+    });
+  }
+  const images = (list) => [...(list || [])].filter((f) => f.type.startsWith("image/"));
+  ta.addEventListener("paste", (ev) => {
+    const files = images(ev.clipboardData && ev.clipboardData.files);
+    if (files.length) {
+      ev.preventDefault();
+      for (const f of files) upload(f);
+    }
+  });
+  ta.addEventListener("dragover", (ev) => ev.preventDefault());
+  ta.addEventListener("drop", (ev) => {
+    const files = images(ev.dataTransfer && ev.dataTransfer.files);
+    if (files.length) {
+      ev.preventDefault();
+      for (const f of files) upload(f);
+    }
+  });
+
+  const IMG_MAX_BYTES = 1900000;
+  const IMG_MAX_SIDE = 1600;
+
+  async function shrink(file) {
+    if (file.type === "image/gif" && file.size <= IMG_MAX_BYTES) return file;
+    const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+    let scale = Math.min(1, IMG_MAX_SIDE / Math.max(bmp.width, bmp.height));
+    for (let round = 0; round < 6; round++) {
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(bmp.width * scale));
+      c.height = Math.max(1, Math.round(bmp.height * scale));
+      const g = c.getContext("2d");
+      g.fillStyle = "#fff";
+      g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(bmp, 0, 0, c.width, c.height);
+      for (const q of [0.85, 0.72, 0.6]) {
+        const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", q));
+        if (blob && blob.size <= IMG_MAX_BYTES) return blob;
+      }
+      scale *= 0.7;
+    }
+    throw new Error("too large");
+  }
+
+  // Uploads an image: its path, or null (the status says why).
+  async function uploadImage(file) {
+    show("Adding the image…", "busy");
+    try {
+      const blob = await shrink(file);
+      const res = await fetch("/upload/" + post, {
+        method: "POST",
+        headers: { "Content-Type": blob.type || "application/octet-stream" },
+        body: blob,
+        credentials: "same-origin",
+      });
+      const text = (await res.text()).trim();
+      if (!res.ok || !/^\/img\/[0-9a-f]{32}$/.test(text)) {
+        show(res.status === 429 ? "Not added: too many changes in a minute" : "The image was not added", "off");
+        return null;
+      }
+      show(batches.length ? "Unsaved changes" : savedText(), batches.length ? "busy" : "");
+      return text;
+    } catch (e) {
+      show("The image could not be added", "off");
+      return null;
+    }
+  }
+
+  // Into the Markdown text, at the caret.
+  async function upload(file) {
+    const path = await uploadImage(file);
+    if (!path || view.readOnly) return;
+    const md = "\n![" + altOf(file.name) + "](" + path + ")\n";
+    const s = view.sel();
+    change(s.a, s.b - s.a, md, s.a + md.length);
+  }
 
   // cls: "" all saved, "busy" work pending, "off" not reaching the server.
   function show(msg, cls) {

@@ -3,11 +3,12 @@
 
 Carried over: users (with their handles), passkeys (so everyone logs in as
 before), sessions (so nobody is logged out), blogs, authors, posts (their
-published text, and the editor's current text as a new document), dates.
+published text, and the editor's current text as a new document), dates,
+comments (threads and replies, deleted ones as deleted), likes, images.
 
-NOT carried over (not in this version): comments, likes, images, tags,
-scheduled publishing (a scheduled post becomes a draft), custom domains,
-search index, mail outbox. The script prints what it leaves behind.
+NOT carried over (not in this version): tags, scheduled publishing (a
+scheduled post becomes a draft), custom domains, the search index, the
+mail outbox. The script prints what it leaves behind.
 
 The editor text of each post is the old document's text, computed by the
 old version's own reference CRDT (~/web/build/crdt_ref) from its
@@ -106,12 +107,36 @@ def main():
                 b = text.encode("utf-8")
                 op = struct.pack("<BIIIIBI", 1, 1, 1, 0, 0, 1, len(b)) + b
                 new.execute("INSERT INTO doc_ops(post_id, data) VALUES (?, ?)", (pid, op))
-    left = {t: old.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("comment", "post_like", "image", "post_tag")}
+        # Comments: each reply's root is its thread's first comment.
+        parents = dict(old.execute("SELECT id, parent_id FROM comment").fetchall())
+
+        def root(cid):
+            seen = 0
+            while parents.get(cid) is not None and seen < 10000:
+                cid = parents[cid]
+                seen += 1
+            return cid
+
+        for cid, pid, parent, author, body, created, deleted in old.execute(
+                "SELECT id, post_id, parent_id, author_id, body_md, created_ms, deleted FROM comment ORDER BY id"):
+            new.execute("INSERT INTO comment(id, post_id, parent_id, root_id, author_id, body_md, created_ms, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (cid, pid, parent, root(cid) if parent is not None else None, author, "" if deleted else body, created, deleted))
+        for row in old.execute("SELECT post_id, user_id, created_ms FROM post_like"):
+            new.execute("INSERT INTO post_like(post_id, user_id, created_ms) VALUES (?, ?, ?)", row)
+        for row in old.execute("SELECT key, post_id, author_id, type, bytes, created_ms FROM image"):
+            new.execute("INSERT INTO image(key, post_id, author_id, type, bytes, created_ms) VALUES (?, ?, ?, ?, ?, ?)", row)
+        new.execute("UPDATE post SET like_count = (SELECT count(*) FROM post_like l WHERE l.post_id = post.id), "
+                    "comment_count = (SELECT count(*) FROM comment c WHERE c.post_id = post.id AND c.deleted = 0)")
+    left = {t: old.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("post_tag",)}
     print(f"carried over: {len(posts)} posts, "
+          f"{new.execute('SELECT count(*) FROM comment').fetchone()[0]} comments, "
+          f"{new.execute('SELECT count(*) FROM post_like').fetchone()[0]} likes, "
+          f"{new.execute('SELECT count(*) FROM image').fetchone()[0]} images, "
           f"{new.execute('SELECT count(*) FROM user').fetchone()[0]} users, "
           f"{new.execute('SELECT count(*) FROM credential').fetchone()[0]} passkeys, "
           f"{new.execute('SELECT count(*) FROM blog').fetchone()[0]} blogs")
-    print("left behind (not in this version): " + ", ".join(f"{n} {t}" for t, n in left.items()) + f", {scheduled} schedules")
+    print("left behind (not in this version): " + ", ".join(f"{n} {t}" for t, n in left.items()) + f", {scheduled} schedules, "
+          f"{old.execute('SELECT count(*) FROM blog WHERE domain IS NOT NULL').fetchone()[0]} custom domains")
 
 
 main()

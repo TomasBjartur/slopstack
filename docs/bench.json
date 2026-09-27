@@ -1,0 +1,366 @@
+{
+  "machine": "cloud container, 2 vCPU; servers on core 0, load generator on core 1",
+  "pages": {
+    "home": "/",
+    "blog": "/b/blog-7",
+    "post": "/b/blog-7/post-13",
+    "author": "/u/writer_7"
+  },
+  "post_note": "a post without comments",
+  "new": {
+    "weight": {
+      "home": {
+        "status": 200,
+        "html": 6614,
+        "html_gz": 1161,
+        "js_files": 2,
+        "js": 36633,
+        "js_gz": 14668
+      },
+      "blog": {
+        "status": 200,
+        "html": 5391,
+        "html_gz": 1034,
+        "js_files": 2,
+        "js": 36633,
+        "js_gz": 14668
+      },
+      "post": {
+        "status": 200,
+        "html": 3653,
+        "html_gz": 1384,
+        "js_files": 2,
+        "js": 36633,
+        "js_gz": 14668
+      },
+      "author": {
+        "status": 200,
+        "html": 6335,
+        "html_gz": 1055,
+        "js_files": 2,
+        "js": 36633,
+        "js_gz": 14668
+      }
+    },
+    "server": {
+      "home": {
+        "req_s": 5170.0,
+        "p50_us": 5908,
+        "p99_us": 12416,
+        "errors": 0
+      },
+      "blog": {
+        "req_s": 4572.0,
+        "p50_us": 6686,
+        "p99_us": 12050,
+        "errors": 0
+      },
+      "post": {
+        "req_s": 8015.0,
+        "p50_us": 4107,
+        "p99_us": 8314,
+        "errors": 0
+      },
+      "author": {
+        "req_s": 4849.0,
+        "p50_us": 6517,
+        "p99_us": 7550,
+        "errors": 0
+      }
+    },
+    "browser": {
+      "home": {
+        "ttfb": 3.2,
+        "fcp": 196,
+        "lcp": 196,
+        "dcl": 179.4,
+        "load": 179.7,
+        "script_ms": 18.8,
+        "task_ms": 166.4
+      },
+      "blog": {
+        "ttfb": 3.8,
+        "fcp": 188,
+        "lcp": 188,
+        "dcl": 107.2,
+        "load": 118.5,
+        "script_ms": 17.6,
+        "task_ms": 150.3
+      },
+      "post": {
+        "ttfb": 3.7,
+        "fcp": 216,
+        "lcp": 216,
+        "dcl": 192.3,
+        "load": 192.3,
+        "script_ms": 14.8,
+        "task_ms": 179.1
+      },
+      "author": {
+        "ttfb": 3.5,
+        "fcp": 196,
+        "lcp": 196,
+        "dcl": 174.7,
+        "load": 174.7,
+        "script_ms": 20.5,
+        "task_ms": 167.8
+      }
+    },
+    "cpu_us": {
+      "home": 225.0,
+      "blog": 235.0,
+      "post": 125.0,
+      "author": 230.0
+    }
+  },
+  "bend": {
+    "weight": {
+      "home": {
+        "status": 200,
+        "html": 17193,
+        "html_gz": 3404,
+        "js_files": 2,
+        "js": 36633,
+        "js_gz": 14668
+      },
+      "blog": {
+        "status": 200,
+        "html": 15440,
+        "html_gz": 3252,
+        "js_files": 2,
+        "js": 36633,
+        "js_gz": 14668
+      },
+      "post": {
+        "status": 200,
+        "html": 4498,
+        "html_gz": 1708,
+        "js_files": 2,
+        "js": 36633,
+        "js_gz": 14668
+      },
+      "author": {
+        "status": 200,
+        "html": 16876,
+        "html_gz": 3295,
+        "js_files": 2,
+        "js": 36633,
+        "js_gz": 14668
+      }
+    },
+    "server": {
+      "home": {
+        "req_s": 7980.0,
+        "p50_us": 3998,
+        "p99_us": 8742,
+        "errors": 0
+      },
+      "blog": {
+        "req_s": 8608.0,
+        "p50_us": 3973,
+        "p99_us": 5218,
+        "errors": 0
+      },
+      "post": {
+        "req_s": 7735.0,
+        "p50_us": 3895,
+        "p99_us": 8464,
+        "errors": 0
+      },
+      "author": {
+        "req_s": 8249.0,
+        "p50_us": 4034,
+        "p99_us": 7460,
+        "errors": 0
+      }
+    },
+    "browser": {
+      "home": {
+        "ttfb": 4.4,
+        "fcp": 240,
+        "lcp": 240,
+        "dcl": 222.7,
+        "load": 222.9,
+        "script_ms": 32.8,
+        "task_ms": 221.4
+      },
+      "blog": {
+        "ttfb": 4.1,
+        "fcp": 220,
+        "lcp": 220,
+        "dcl": 201.8,
+        "load": 201.9,
+        "script_ms": 31.3,
+        "task_ms": 202.2
+      },
+      "post": {
+        "ttfb": 3.3,
+        "fcp": 212,
+        "lcp": 212,
+        "dcl": 109.5,
+        "load": 119,
+        "script_ms": 31.9,
+        "task_ms": 190.0
+      },
+      "author": {
+        "ttfb": 3.4,
+        "fcp": 228,
+        "lcp": 228,
+        "dcl": 203.3,
+        "load": 206.1,
+        "script_ms": 30.5,
+        "task_ms": 209.8
+      }
+    },
+    "cpu_us": {
+      "home": 125.0,
+      "blog": 135.0,
+      "post": 145.0,
+      "author": 135.0
+    }
+  },
+  "next": {
+    "weight": {
+      "home": {
+        "status": 200,
+        "html": 48573,
+        "html_gz": 5809,
+        "js_files": 6,
+        "js": 596834,
+        "js_gz": 174769
+      },
+      "blog": {
+        "status": 200,
+        "html": 44646,
+        "html_gz": 5639,
+        "js_files": 6,
+        "js": 594660,
+        "js_gz": 174649
+      },
+      "post": {
+        "status": 200,
+        "html": 15479,
+        "html_gz": 3544,
+        "js_files": 6,
+        "js": 576619,
+        "js_gz": 172778
+      },
+      "author": {
+        "status": 200,
+        "html": 48771,
+        "html_gz": 5705,
+        "js_files": 6,
+        "js": 597336,
+        "js_gz": 174694
+      }
+    },
+    "server": {
+      "home": {
+        "req_s": 122.0,
+        "p50_us": 257341,
+        "p99_us": 332505,
+        "errors": 0
+      },
+      "blog": {
+        "req_s": 148.0,
+        "p50_us": 219461,
+        "p99_us": 310071,
+        "errors": 0
+      },
+      "post": {
+        "req_s": 236.0,
+        "p50_us": 124220,
+        "p99_us": 186224,
+        "errors": 0
+      },
+      "author": {
+        "req_s": 157.0,
+        "p50_us": 194538,
+        "p99_us": 322139,
+        "errors": 0
+      }
+    },
+    "browser": {
+      "home": {
+        "ttfb": 38.2,
+        "fcp": 252,
+        "lcp": 252,
+        "dcl": 230.8,
+        "load": 465,
+        "script_ms": 115.1,
+        "task_ms": 509.7
+      },
+      "blog": {
+        "ttfb": 24.5,
+        "fcp": 244,
+        "lcp": 244,
+        "dcl": 227.4,
+        "load": 447.7,
+        "script_ms": 118.0,
+        "task_ms": 513.8
+      },
+      "post": {
+        "ttfb": 20.8,
+        "fcp": 232,
+        "lcp": 232,
+        "dcl": 112.2,
+        "load": 447.1,
+        "script_ms": 107.1,
+        "task_ms": 478.5
+      },
+      "author": {
+        "ttfb": 30.9,
+        "fcp": 280,
+        "lcp": 280,
+        "dcl": 146.3,
+        "load": 471.7,
+        "script_ms": 112.6,
+        "task_ms": 507.5
+      }
+    }
+  },
+  "novel": {
+    "weight": {
+      "status": 200,
+      "html": 7446725,
+      "html_gz": 34312,
+      "js_files": 2,
+      "js": 36633,
+      "js_gz": 14668
+    },
+    "server": {
+      "req_s": 249.0,
+      "p50_us": 122366,
+      "p99_us": 219297,
+      "errors": 0
+    },
+    "browser": {
+      "ttfb": 6.7,
+      "fcp": 368,
+      "lcp": 368,
+      "dcl": 13201.9,
+      "load": 13208.1,
+      "script_ms": 1746.5,
+      "task_ms": 14877.0
+    }
+  },
+  "substack": {
+    "url": "https://on.substack.com/",
+    "weight": {
+      "html": 118845,
+      "html_gz": 22801,
+      "js_files": 157,
+      "js": 6545850,
+      "js_gz": 2028591
+    },
+    "browser": {
+      "ttfb": 12,
+      "fcp": 1032,
+      "lcp": 1032,
+      "dcl": 2998.2,
+      "load": 6247.8,
+      "script_ms": 2377.9,
+      "task_ms": 6520.8
+    }
+  }
+}
