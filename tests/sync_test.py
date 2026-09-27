@@ -53,8 +53,9 @@ def dele(rep, ctr, n):
     return struct.pack("<BIII", 2, rep, ctr, n)
 
 
-def sync(sid, post, since, rep, ops=b""):
-    st, body, _ = http("POST", f"/edit/{post}/sync", sid, struct.pack("<QI", since, rep) + ops, "application/octet-stream")
+def sync(sid, post, since, rep, ops=b"", me=None):
+    """me: the asking page's own replica (default: rep, as a page sends its own)."""
+    st, body, _ = http("POST", f"/edit/{post}/sync?me={rep if me is None else me}", sid, struct.pack("<QI", since, rep) + ops, "application/octet-stream")
     if st != 200:
         return st, None
     kind, seq, more = body[0], struct.unpack("<Q", body[1:9])[0], body[9]
@@ -99,7 +100,7 @@ def run(db):
     check("an empty document", st == 200 and r["seq"] == 0 and r["ops"] == b"" and r["snap"] is None, (st, r))
     batch = ins(ra, 1, 0, 0, 1, "hello")
     st, r = sync(a, post, 0, ra, batch)
-    check("a batch stored and answered", st == 200 and r["seq"] > 0 and r["ops"] == batch, (st, r))
+    check("a batch stored, and not sent back to its writer (it has it)", st == 200 and r["seq"] > 0 and r["ops"] == b"", (st, r))
     seq1 = r["seq"]
     st, r = sync(b, post, 0, rb)
     check("a co-author gets it", st == 200 and r["ops"] == batch and r["seq"] == seq1, (st, r))
@@ -107,9 +108,14 @@ def run(db):
     check("a repeated batch (a retry): not stored again", st == 200 and r["seq"] == seq1 and r["ops"] == b"", (st, r))
     b2 = ins(rb, 1, ra, 5, 1, " world")
     st, r = sync(b, post, seq1, rb, b2)
-    check("the co-author's batch", st == 200 and r["ops"] == b2, (st, r))
+    check("the co-author's batch, stored", st == 200 and r["ops"] == b"" and r["seq"] > seq1, (st, r))
     st, r = sync(a, post, seq1, ra)
     check("…reaches the first writer", st == 200 and r["ops"] == b2, (st, r))
+    # A new page load restoring unsent edits sends them as its old replica
+    # but is a new one (me): the old replica's stored batches are not its
+    # own, and it gets them (found in Chrome: a reopened page stayed empty).
+    st, r = sync(a, post, 0, ra, me=ra2)
+    check("a page sending an earlier page's edits still gets that page's stored ones", st == 200 and batch in r["ops"] and b2 in r["ops"], (st, r))
     seq2 = r["seq"]
 
     # Attacks and mistakes: refused whole, nothing stored.
@@ -134,7 +140,9 @@ def run(db):
     st, _, _ = http("POST", f"/edit/{post}/sync", a, b"short", "application/octet-stream")
     check("a body too short: 400", st == 400, st)
     st, r = sync(a, post, seq2, ra, ins(ra, 6, ra, 5, 1, "!"))
-    check("after all that, an honest batch still works", st == 200 and r["ops"] == ins(ra, 6, ra, 5, 1, "!"), (st, r))
+    check("after all that, an honest batch still works", st == 200 and r["seq"] > seq2, (st, r))
+    st, r = sync(b, post, seq2, rb)
+    check("…and reaches the co-author", st == 200 and ins(ra, 6, ra, 5, 1, "!") in r["ops"], (st, r))
     seq3 = r["seq"]
 
     # Removed from the blog: syncing stops.
@@ -197,4 +205,5 @@ def main():
     sys.exit(1 if fails else 0)
 
 
-main()
+if __name__ == "__main__":
+    main()

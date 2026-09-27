@@ -24,6 +24,8 @@ code is tested against), or **tested** (how).
 | Collaborative text: replicas with the same operations show the same text, whatever the order or repeats | `lean/Fugue.lean` `converge`, `text_congr`, `merge_*` | proved about a model |
 | The Rust CRDT is that model | `src/crdt.rs` | tested: 410 random multi-replica histories against a naive tree walk (views, snapshots, repeats), 200 against the Lean definitions themselves (`tests/crdt_lean.sh`); mutations caught |
 | Only the writer's own replica number makes new elements | `src/docs.rs` `store`, `doc_rep` | tested (`tests/sync_test.py`, red team) |
+| A parked request's answer reaches only its own connection; a parked client that leaves or sends more is closed; every parked request ends | `src/server.rs` (`answer`, generations) | tested in the simulator (20 seeds of 300 clients, slots reused by other parked requests; both guards mutation-checked) |
+| A waiting request is answered with the post only if the asker may still see it (edit it, for the editor) when the answer is made | `src/site.rs` `answer_waits` | tested (`tests/push_test.py`: removed while waiting gets 403; unpublished, 404; mutation-checked) |
 
 What is trusted and not proved: SQLite and HACL* (vendored; HACL* is
 itself formally verified), the Rust compiler and standard library,
@@ -35,7 +37,7 @@ browser, Caddy.
 | Suite | What | Size |
 |---|---|---|
 | `build/server test http` | parser: property tests, 10x heads | growth checked N vs 10N |
-| `build/server test sim` | the event loop under a seeded network: splits, slow readers and senders, floods, 100,000 connections | 11,530 checks |
+| `build/server test sim` | the event loop under a seeded network: splits, slow readers and senders, floods, 100,000 connections, parked requests | 19,941 checks |
 | `build/server test markdown` | CommonMark 0.31.2 | 576 exact, 76 deviations by law (raw HTML shown as text; unsafe schemes), 0 failures |
 | `build/server test crdt` | the CRDT against the model, bad input, 10x budgets | 410 histories |
 | `tests/crdt_lean.sh` | Rust against the Lean model's definitions | 200 histories |
@@ -43,6 +45,7 @@ browser, Caddy.
 | `tests/app_test.py` | flows and attacks over HTTP | 115 |
 | `tests/passkey_test.py` | WebAuthn with a software authenticator | 71 |
 | `tests/sync_test.py` | the editor's sync protocol and its attacks | 29 |
+| `tests/push_test.py` | waits answered by changes on any of 3 workers, not by one's own; timeouts; limits; rights re-checked; live comments | 14 |
 | `tests/redteam_test.py` | every kind of user against every route | 235 |
 | `tests/browser_test.py` | Chrome with a virtual authenticator: sign-up, login, recovery, writing | 31 |
 | `tests/collab_test.py` | two Chromes, two users, one document, offline | 16 |
@@ -68,6 +71,8 @@ browser, Caddy.
 | Visual mode flattened nested lists when writing Markdown back (a sub-item's text joined its parent's) | adding Tab to nest list items | no |
 | Datastar 1.0.4 sends no second request to the same URL from the same element (replies, likes, a second co-author did nothing) | the comments test in two Chromes | no |
 | The first edit at a new place in a pasted novel with accents read the run from its start (a paste is one run): 30 ms in the browser at 6M characters, 300 ms at 60M | profiling the editor at 6M; the CRDT's own budget test had used ASCII text, whose byte offsets need no reading | no: a cost, not a wrong answer. Runs are now capped at 4,096 characters (split as an edit would split them); a test times the slowest of 200 edits at new places (27 us; 10 ms uncapped) |
+| Not sending a writer its own changes back skipped by the replica that sent the request; a reopened page sends edits kept from an earlier page load under that page's number, so it was never sent that page's saved edits (and showed nothing) | the usability test in Chrome (offline edits, browser shut down, reopened) | no: the rule was a claim about the client ("it has them") that was false in one case. Now the page names its own replica (`?me=`), which is new each page load; a test sends an earlier page's edits and checks it gets that page's stored ones (mutation-checked) |
+| A comment could show twice: the answer to your own comment and the live answer cross (rare with polling, every time once live comments were pushed) | the comments test in Chrome, after push | no. The page keeps the first of each comment id |
 | A slowloris could lock readers out of the head buffers; evicting a connection lost its pending output; memory at 100K connections | the simulator | no |
 
 As in the first version: proofs held where aimed (no authorization,
@@ -118,8 +123,23 @@ version, found the two worst bugs in this one within minutes.
 - **Visual mode still takes the whole text on a remote change or undo**
   (`String(view.text)`, then split into blocks): O(n) at such moments,
   not per local key.
-- **Real-time is polling** (0.4 s while others type, 1.5 s otherwise),
-  not push: simple across worker processes; latency is visible.
+- **Real-time was polling (fixed): now pushed.** The editor asked every
+  0.4 s (1.5 s when idle) and waited 150 ms after the last key before
+  sending, so a co-author saw nothing while someone typed steadily
+  (3.2 s of typing, measured: nothing until the pause). Now a request
+  waits at the server for others' changes (long polling; parked in the
+  event loop), woken across worker processes through shared counters;
+  edits are sent every 100 ms while typing. Measured in two Chromes:
+
+  | From A's key to B's screen | Polling | Pushed |
+  |---|---|---|
+  | After a quiet spell | median 883 ms, worst 1,064 | 107 ms, worst 109 |
+  | Typing a key a second | median 476 ms, worst 530 | 107 ms, worst 108 |
+  | Typing a key every 50 ms | nothing for 3.2 s | first key after 109 ms, then about 55 ms behind |
+
+  (The 100 ms is A's own send interval; the push itself takes about
+  7 ms.) Live comments are pushed the same way (they were polled every
+  10 s). A writer is no longer sent its own changes back.
 - **Left behind in the conversion from the first version**: comments,
   likes, images, tags, schedules, custom domains (not in this version's v1).
 - **Kani is not used yet.** The design planned bounded model checking of

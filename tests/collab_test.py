@@ -175,7 +175,10 @@ def main():
         eb.type_end(" (offline)")
         ea.type_at(0, "# ")
         time.sleep(2.5)
-        check("offline editor keeps its edit locally", "(offline)" in eb.text() and not eb.text().startswith("# "), eb.text())
+        # (Whether B sees "# " yet depends on its waiting request: one sent
+        # before going offline may still bring it, as Chrome's offline mode
+        # does not cut requests already made.)
+        check("offline editor keeps its edit locally, and it has not left", "(offline)" in eb.text() and "(offline)" not in ea.text(), (eb.text(), ea.text()))
         check("offline editor says so", "Offline" in (eb.status() or ""), eb.status())
         eb.offline(False)
         got = settle(eds)
@@ -233,4 +236,5 @@ def main():
     sys.exit(1 if fails else 0)
 
 
-main()
+if __name__ == "__main__":
+    main()

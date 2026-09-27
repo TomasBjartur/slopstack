@@ -369,7 +369,7 @@ def main():
         # Until the document has arrived, the textarea is read-only: an edit
         # then was diffed against a partial (here: empty) document.
         slow = br.ws.call("Page.addScriptToEvaluateOnNewDocument", {"source":
-            "{ const f = window.fetch; window.fetch = (u, o) => String(u).endsWith('/sync') && !window.__synced"
+            "{ const f = window.fetch; window.fetch = (u, o) => /\\/sync(\\?|$)/.test(String(u)) && !window.__synced"
             " ? new Promise((r) => setTimeout(r, 1500)).then(() => { window.__synced = true; return f(u, o); }) : f(u, o); }"})
         br.open(f"{BASE}/edit/{pid2}", loaded=False)
         ro = br.js("document.getElementById('editor').readOnly")

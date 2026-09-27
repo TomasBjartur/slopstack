@@ -9,7 +9,11 @@
 //     nothing breaks;
 //   - after the idle timeout, every connection is closed and every buffer
 //     is back in its pool (nothing leaks);
-//   - the same seed gives the same run (deterministic).
+//   - the same seed gives the same run (deterministic);
+//   - parked requests (answered later: long polling) are answered on
+//     their own connection only, keep it alive for the next request, and
+//     never reach a later connection in the same slot; one that vanishes,
+//     sends more while parked, or is never answered is closed.
 // 10x: one seed runs 100,000 connections at once (CONN_MAX: ten times the
 // worst crowd we expect).
 
@@ -131,7 +135,7 @@ fn run_seed(seed: u64, crowd: usize, split: bool, check: &mut dyn FnMut(bool, St
         io.connect(bytes, window, reads, pace, vanish, piece);
         plans.push(Plan { kind, ids, body });
     }
-    let mut s = server::Server::new(io, app::Site);
+    let mut s = server::Server::new(io, app::Site::default());
     // Run past the head and idle timeouts, so every connection ends.
     while s.io.now < IDLE_TIMEOUT_MS + HEAD_TIMEOUT_MS + 5000 {
         s.turn(50);
@@ -168,7 +172,7 @@ fn flood_then_readers(check: &mut dyn FnMut(bool, String)) {
     for _ in 0..flood {
         io.connect(b"GET /echo/never HTTP/1.1\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec(), 65536, 65536, 900, u64::MAX, 8);
     }
-    let mut s = server::Server::new(io, app::Site);
+    let mut s = server::Server::new(io, app::Site::default());
     while s.io.now < 2000 {
         s.turn(50);
     }
@@ -188,6 +192,89 @@ fn flood_then_readers(check: &mut dyn FnMut(bool, String)) {
     }
     check(ok == 200, format!("after a flood of {flood} slow senders, {ok} of 200 readers were answered"));
     println!("a flood of {flood} slow senders, then 200 readers: {ok} answered; {} flood connections evicted", s.stats.evicted);
+}
+
+/// Parked requests among ordinary ones, the slots reused while they wait.
+fn parking(seed: u64, check: &mut dyn FnMut(bool, String)) {
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum P {
+        Answered,
+        ThenAnother,
+        Vanishes,
+        MoreWhileParked,
+        Never,
+        Plain,
+    }
+    let mut io = SimIo::new(seed);
+    let mut rng = Rng(seed * 31 + 7);
+    let mut plan = vec![];
+    for c in 0..300 {
+        let kind = match rng.below(12) {
+            0..=3 => P::Answered,
+            4..=5 => P::ThenAnother,
+            6..=7 => P::Vanishes,
+            8 => P::MoreWhileParked,
+            9 => P::Never,
+            _ => P::Plain,
+        };
+        let delay = 200 + rng.below(3000);
+        let req = match kind {
+            P::Never => format!("GET /park/never/n{c} HTTP/1.1\r\n\r\n"),
+            P::Plain => format!("GET /echo/e{c} HTTP/1.1\r\n\r\n"),
+            P::MoreWhileParked => format!("GET /park/{delay}/m{c} HTTP/1.1\r\n\r\nGET /echo/x{c} HTTP/1.1\r\n\r\n"),
+            _ => format!("GET /park/{delay}/p{c} HTTP/1.1\r\n\r\n"),
+        };
+        // (Gone well before its answer is due.)
+        let vanish = if kind == P::Vanishes { 10 + rng.below(delay - 100) } else { u64::MAX };
+        let piece = if kind == P::MoreWhileParked { usize::MAX } else { 1 << 20 };
+        let i = io.connect(req.into_bytes(), 65536, 65536, 20, vanish, piece);
+        plan.push((i, kind, delay, c));
+    }
+    let mut s = server::Server::new(io, app::Site::default());
+    let mut sent_second = vec![false; plan.len()];
+    let mut most = 0;
+    // (Past the park timeout, then the idle timeout, so every connection ends.)
+    while s.io.now < PARK_TIMEOUT_MS + IDLE_TIMEOUT_MS + 5000 {
+        s.turn(50);
+        most = most.max(s.parked());
+        // The second request of ThenAnother, once the first is answered.
+        for &(i, kind, _, c) in &plan {
+            if kind == P::ThenAnother && !sent_second[i] && !answers(&s.io.clients[i].got).is_empty() {
+                sent_second[i] = true;
+                s.io.clients[i].to_send.extend_from_slice(format!("GET /echo/q{c} HTTP/1.1\r\n\r\n").as_bytes());
+            }
+        }
+        // Newcomers while others wait: slots are reused, some by parked
+        // requests (answered after those of the vanished before them: an
+        // answer meant for a vanished one must not reach them).
+        if s.io.now < 5000 && rng.below(4) == 0 {
+            let k = s.io.clients.len();
+            let req = if rng.below(2) == 0 { format!("GET /echo/late{k} HTTP/1.1\r\n\r\n") } else { format!("GET /park/{}/late{k} HTTP/1.1\r\n\r\n", 3500 + rng.below(2000)) };
+            s.io.connect(req.into_bytes(), 65536, 65536, 20, u64::MAX, 1 << 20);
+        }
+    }
+    for &(i, kind, _, c) in &plan {
+        let cl = &s.io.clients[i];
+        let got: Vec<(u16, String)> = answers(&cl.got).into_iter().map(|(st, b)| (st, String::from_utf8_lossy(&b).to_string())).collect();
+        let want: Vec<(u16, String)> = match kind {
+            P::Answered => vec![(200, format!("p{c}"))],
+            P::ThenAnother => vec![(200, format!("p{c}")), (200, format!("q{c}"))],
+            P::Plain => vec![(200, format!("e{c}"))],
+            P::Vanishes | P::Never | P::MoreWhileParked => vec![],
+        };
+        let closed_ok = match kind {
+            P::Never | P::MoreWhileParked => cl.server_closed,
+            _ => true,
+        };
+        check(got == want && closed_ok, format!("parking seed {seed} client {i} ({kind:?}): got {got:?}, closed {}", cl.server_closed));
+    }
+    // Every other connection got only its own answers.
+    for i in plan.len()..s.io.clients.len() {
+        let got = answers(&s.io.clients[i].got);
+        check(got == vec![(200, format!("late{i}").into_bytes())], format!("parking seed {seed}: a newcomer {i} got {:?}", got.iter().map(|(a, b)| (*a, String::from_utf8_lossy(b).to_string())).collect::<Vec<_>>()));
+    }
+    check(most > 50, format!("parking seed {seed}: at most {most} parked at once"));
+    check(s.parked() == 0 && s.open_connections() == 0 && s.buffers_in_use() == (0, 0), format!("parking seed {seed}: {} parked, {} open, buffers {:?}", s.parked(), s.open_connections(), s.buffers_in_use()));
 }
 
 pub fn run() {
@@ -216,6 +303,10 @@ pub fn run() {
     // A flood of slow senders, more than the head buffers, then readers:
     // the readers are all answered (the flood's oldest are evicted).
     flood_then_readers(&mut check);
+    // Parked requests (long polling), with slots reused while they wait.
+    for seed in 1..=20 {
+        parking(seed, &mut check);
+    }
     // 10x: 100,000 connections at once.
     let t = std::time::Instant::now();
     let mut big_fails = std::collections::BTreeMap::new();

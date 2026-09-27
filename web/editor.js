@@ -20,9 +20,14 @@ import { View, diff } from "./view.js";
 import { History } from "./history.js";
 import { setupModes, altOf } from "./modes.js";
 
-const SYNC_MS = 1500;       // polling while nothing happens
-const FAST_MS = 400;        // polling while others are typing
-const DEBOUNCE_MS = 150;    // after a local edit
+// Others' changes are pushed: one request waits at the server until there
+// are some (?wait=1, answered within 25 s) and is sent again at once
+// (long polling, through any proxy). Only while that fails does the
+// editor poll, every SYNC_MS.
+const SYNC_MS = 1500;
+// A local edit is sent this soon after it (while typing: every SEND_MS,
+// not only in pauses, so co-authors see the text as it is typed).
+const SEND_MS = 100;
 // A request carries at most this much (the server takes 16 MiB); a larger
 // paste is cut into pieces of at most PIECE characters, each its own
 // operation, and sent over several requests.
@@ -53,7 +58,8 @@ function start(ta) {
   let batches = [];         // local batches not yet acknowledged: {rep, ops}, oldest first
   let busy = false;
   let timer = 0;
-  let fast = 0;             // time of the last change from elsewhere
+  let listening = false;    // a request waits at the server for others' changes
+  let pushed = false;       // ...and the last one was answered
   const history = new History();
   // Until the document has arrived, the view shows the page's text (or
   // nothing, for a long one) but the CRDT does not hold it yet: an edit
@@ -264,7 +270,7 @@ function start(ta) {
     saveLabel = "Saved";
     show("Unsaved changes", "busy");
     store();
-    schedule(DEBOUNCE_MS);
+    soon(SEND_MS);
   }
 
   function undo() {
@@ -419,6 +425,7 @@ function start(ta) {
     ev.preventDefault();
     show("Saving…", "busy");
     schedule(0);
+    if (loaded) listen();
   });
 
   // REMOTE CHANGES: merged, and each visible change passed to the view (and
@@ -429,10 +436,7 @@ function start(ta) {
       history.remote(p, del, ins.length);
     });
     if (got === 2) showDoc();
-    if (got) {
-      fast = Date.now();
-      modes.remote(view.text);
-    }
+    if (got) modes.remote(view.text);
   }
 
   // The view to the CRDT's text (loading, or after a large batch).
@@ -450,14 +454,101 @@ function start(ta) {
     if (ops.length) batches.push({ rep, ops });
   }
 
+  let timerAt = 0;
   function schedule(ms) {
     clearTimeout(timer);
-    timer = setTimeout(sync, ms);
+    timerAt = Date.now() + ms;
+    timer = setTimeout(() => {
+      timerAt = 0;
+      sync();
+    }, ms);
   }
 
+  // Within ms: a sooner send already planned stands (not pushed back by
+  // every key).
+  function soon(ms) {
+    if (!timerAt || timerAt > Date.now() + ms) schedule(ms);
+  }
+
+  // When to send again (null: not until there is something to send, as
+  // others' changes are pushed).
   function next() {
-    if (batches.length) return DEBOUNCE_MS;
-    return Date.now() - fast < 10000 ? FAST_MS : SYNC_MS;
+    if (batches.length) return SEND_MS;
+    return pushed ? null : SYNC_MS;
+  }
+
+  function request(r, ops, n, size) {
+    const body = new Uint8Array(12 + size);
+    const dv = new DataView(body.buffer);
+    dv.setBigUint64(0, BigInt(since), true);
+    dv.setUint32(8, r, true);
+    for (let i = 0, at = 12; i < n; i++) {
+      body.set(ops[i].ops, at);
+      at += ops[i].ops.length;
+    }
+    return body;
+  }
+
+  // A sync answer: a snapshot (first load), then batches; since moves on.
+  // Answers whether more waits at the server.
+  function take(reply) {
+    const rv = new DataView(reply.buffer, reply.byteOffset, reply.byteLength);
+    const kind = reply[0];
+    const seq = Number(rv.getBigUint64(1, true));
+    const more = reply[9] === 1;
+    let at = 10;
+    if (kind === 1) {
+      const len = rv.getUint32(at, true);
+      doc.load(reply.subarray(at + 4, at + 4 + len));
+      at += 4 + len;
+    }
+    const ops = reply.subarray(at);
+    if (loaded) {
+      if (ops.length) remote(ops);
+    } else if (ops.length) doc.apply(ops);
+    since = Math.max(since, seq);
+    return more;
+  }
+
+  // PUSH: a request that waits for others' changes, again and again. Its
+  // answers may cross sync()'s: both only move since forward, and an
+  // operation applied twice changes nothing.
+  async function listen() {
+    if (listening) return;
+    listening = true;
+    pushed = true; // (until it fails: then polling)
+    while (loaded && !view.readOnly) {
+      const t0 = Date.now();
+      let ok = false, got = false;
+      try {
+        const res = await fetch(url + "?wait=1&me=" + rep, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: request(rep, [], 0, 0), credentials: "same-origin" });
+        if (res.ok) {
+          const reply = new Uint8Array(await res.arrayBuffer());
+          got = reply.length > 10;
+          ok = true;
+          if (take(reply)) got = true;
+        } else if (res.status === 403) {
+          pushed = false;
+          schedule(0); // (logged out: sync() says so; logging in starts this again)
+          break;
+        }
+      } catch (e) {
+        // offline: polling says so, and "online" starts this again
+      }
+      const was = pushed;
+      pushed = ok;
+      if (!ok) {
+        schedule(0); // (polling, until this works again)
+        if (!navigator.onLine) break;
+        await new Promise((r) => setTimeout(r, SYNC_MS * 2));
+      } else if (!got && Date.now() - t0 < 1000) {
+        // Answered at once with nothing: the server has too many waiting.
+        pushed = false;
+        if (was) schedule(SYNC_MS);
+        await new Promise((r) => setTimeout(r, SYNC_MS));
+      }
+    }
+    listening = false;
   }
 
   async function sync() {
@@ -468,17 +559,10 @@ function start(ta) {
     let n = 0, size = 0;
     const r = batches.length ? batches[0].rep : rep;
     while (n < batches.length && batches[n].rep === r && (n === 0 || size + batches[n].ops.length <= SEND_BYTES)) size += batches[n++].ops.length;
-    const body = new Uint8Array(12 + size);
-    const dv = new DataView(body.buffer);
-    dv.setBigUint64(0, BigInt(since), true);
-    dv.setUint32(8, r, true);
-    for (let i = 0, at = 12; i < n; i++) {
-      body.set(batches[i].ops, at);
-      at += batches[i].ops.length;
-    }
+    const body = request(r, batches, n, size);
     if (n) show("Saving…", "busy");
     try {
-      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body, credentials: "same-origin" });
+      const res = await fetch(url + "?me=" + rep, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body, credentials: "same-origin" });
       if (!res.ok) {
         if (res.status === 403) show("Not saved: you are logged out, or no longer an author here. Your text is kept on this device.", "off", true);
         else show(res.status === 409 ? "Not saved: this post has reached its limit of stored edits. Your text is kept here; copy it into a new post."
@@ -487,22 +571,8 @@ function start(ta) {
         return false;
       }
       const reply = new Uint8Array(await res.arrayBuffer());
-      const rv = new DataView(reply.buffer);
-      const kind = reply[0];
-      const seq = Number(rv.getBigUint64(1, true));
-      more = reply[9] === 1;
-      let at = 10;
-      if (kind === 1) {
-        const len = rv.getUint32(at, true);
-        doc.load(reply.subarray(at + 4, at + 4 + len));
-        at += 4 + len;
-      }
       batches = batches.slice(n);
-      const ops = reply.subarray(at);
-      if (loaded) {
-        if (ops.length) remote(ops);
-      } else if (ops.length) doc.apply(ops);
-      since = Math.max(since, seq);
+      more = take(reply);
       if (!more && !loaded) {
         // The whole document is here: unsent edits from last time go in
         // (a repeat of one already stored changes nothing), then the view.
@@ -511,6 +581,7 @@ function start(ta) {
         showDoc();
         view.readOnly = false;
         modes.loaded();
+        listen();
       }
       store();
       show(batches.length ? "Unsaved changes" : savedText(), batches.length ? "busy" : "");
@@ -521,7 +592,8 @@ function start(ta) {
     } finally {
       busy = false;
       if (more || (ok && batches.length && n)) schedule(0);
-      else schedule(ok ? next() : SYNC_MS);
+      else if (!ok) schedule(SYNC_MS);
+      else if (next() !== null) schedule(next());
     }
     return true;
   }
@@ -580,7 +652,10 @@ function start(ta) {
   show("Loading…", "busy");
   ready(ta.dataset.wasm).then(() => {
     doc = new Doc();
-    window.addEventListener("online", () => schedule(0));
+    window.addEventListener("online", () => {
+      schedule(0);
+      if (loaded) listen();
+    });
     schedule(0);
   }, () => show("This browser could not load the editor. Your text is safe on the server.", "off"));
 }

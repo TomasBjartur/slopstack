@@ -47,6 +47,15 @@ pub const HEAD_TIMEOUT_MS: u64 = 10_000;
 /// An idle keep-alive connection is closed after this.
 pub const IDLE_TIMEOUT_MS: u64 = 60_000;
 
+/// A parked request (one the application answers later: an editor
+/// waiting for others' changes) is closed after this if still unanswered
+/// (the application answers within PARK_ANSWER_MS).
+pub const PARK_TIMEOUT_MS: u64 = 40_000;
+
+/// While requests are parked, the loop asks the application this often
+/// whether any can be answered.
+pub const PARK_TICK_MS: u64 = 20;
+
 /// Events handled per wait (the loop's batch).
 pub const EVENTS_MAX: usize = 1024;
 

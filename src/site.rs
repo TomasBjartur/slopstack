@@ -16,6 +16,7 @@ use crate::authz::{authorize, csrf, Permit};
 use crate::db::{No, Q, Store};
 use crate::form::{email_ok, slugify, Form};
 use crate::html::Markup;
+use crate::notify::{Changes, Kind};
 use crate::pages::{self, H};
 use crate::resp::{self, hex, unhex, Cache};
 use crate::server::{App, Ctx, Request};
@@ -65,17 +66,24 @@ pub struct Conf {
     /// to making a passkey; the address is not checked.
     pub direct: bool,
     pub secure: bool,
+    /// How long an editor's request for others' changes waits for them
+    /// (BLOG_WAIT_MS; tests shorten it).
+    pub wait_ms: u64,
 }
 
 impl Conf {
     pub fn new(origin: &str, rp_id: &str, direct: bool) -> Conf {
-        Conf { origin: origin.to_string(), rp_id: rp_id.to_string(), rp_hash: sha256(rp_id.as_bytes()), direct, secure: origin.starts_with("https://") }
+        Conf { origin: origin.to_string(), rp_id: rp_id.to_string(), rp_hash: sha256(rp_id.as_bytes()), direct, secure: origin.starts_with("https://"), wait_ms: WAIT_MS }
     }
 
     pub fn from_env(port: u16) -> Conf {
         let origin = std::env::var("BLOG_ORIGIN").unwrap_or_else(|_| format!("http://localhost:{port}"));
         let rp_id = std::env::var("BLOG_RP_ID").unwrap_or_else(|_| "localhost".into());
-        Conf::new(&origin, &rp_id, std::env::var("BLOG_SIGNUP_DIRECT").as_deref() == Ok("1"))
+        let mut c = Conf::new(&origin, &rp_id, std::env::var("BLOG_SIGNUP_DIRECT").as_deref() == Ok("1"));
+        if let Some(ms) = std::env::var("BLOG_WAIT_MS").ok().and_then(|v| v.parse().ok()) {
+            c.wait_ms = ms;
+        }
+        c
     }
 }
 
@@ -84,6 +92,47 @@ impl Conf {
 struct FeedCache {
     map: HashMap<String, (i64, String, Rc<Vec<u8>>)>,
     bytes: usize,
+}
+
+/// An editor waiting for others' changes (long polling) is answered when
+/// there are some, or after this with none (under the proxies' and the
+/// server's own timeouts: limits::PARK_TIMEOUT_MS).
+const WAIT_MS: u64 = 25_000;
+/// Requests waiting at once, in one worker, and by one user: past these,
+/// answered at once (the editor then waits a while before asking again).
+const WAITS_MAX: usize = 20_000;
+const WAITS_PER_USER: usize = 32;
+/// The next live-comments request goes after this: at once when the
+/// server waits for comments, after a pause when it could not.
+const LIVE_NEXT: &str = "100ms";
+const LIVE_PAUSE: &str = "10s";
+
+/// A parked request: answered when its post changes (or at `until`).
+struct Wait {
+    conn: u64,
+    post: u64,
+    uid: u64,
+    what: Waiting,
+    /// The post's change counter when last looked at (src/notify.rs).
+    seen: u32,
+    /// Answered by then (monotonic ms) in any case.
+    until: u64,
+}
+
+enum Waiting {
+    /// The editor's sync: batches after since, but for its own (rep).
+    Doc { since: i64, rep: u32 },
+    /// A reader's live comments: those after `after`.
+    Comments { after: u64, n: u64 },
+}
+
+impl Waiting {
+    fn kind(&self) -> Kind {
+        match self {
+            Waiting::Doc { .. } => Kind::Doc,
+            Waiting::Comments { .. } => Kind::Comments,
+        }
+    }
 }
 
 const FEEDS_MAX: usize = 20_000;
@@ -152,6 +201,9 @@ pub struct Site {
     minute: u64,
     challenges: u32,
     swept_ms: u64,
+    /// What changed, across worker processes; and the requests waiting for it.
+    changes: Changes,
+    waits: Vec<Wait>,
 }
 
 /// The signed-in user.
@@ -213,8 +265,8 @@ fn db_code(e: DbErr) -> u16 {
 type Res = Result<(), u16>;
 
 impl Site {
-    pub fn new(st: Store, conf: Conf) -> Site {
-        Site { st, docs: crate::docs::Docs::new(), feeds: FeedCache { map: HashMap::new(), bytes: 0 }, stmt_stats: std::env::var("BLOG_STMT_STATS").as_deref() == Ok("1"), requests: 0, comments_md: HashMap::new(), conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, opens: HashMap::new(), minute: 0, challenges: 0, swept_ms: 0 }
+    pub fn new(st: Store, conf: Conf, changes: Changes) -> Site {
+        Site { st, docs: crate::docs::Docs::new(), feeds: FeedCache { map: HashMap::new(), bytes: 0 }, stmt_stats: std::env::var("BLOG_STMT_STATS").as_deref() == Ok("1"), requests: 0, comments_md: HashMap::new(), conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, opens: HashMap::new(), minute: 0, challenges: 0, swept_ms: 0, changes, waits: Vec::new() }
     }
 
     // RESPONSES
@@ -1169,6 +1221,9 @@ impl Site {
                 Ok(format!("/b/{blog_slug}/{slug}?published=1"))
             })
             .map_err(no_code)?;
+        if body.is_some() {
+            self.changes.bump(Kind::Doc, id);
+        }
         resp::redirect(out, &dest, b"");
         Ok(())
     }
@@ -1218,6 +1273,12 @@ impl Site {
     // sends its operations; the answer brings everyone else's). Body:
     // since (u64: the last stored batch the editor has), rep (u32: its
     // replica number), then operations (src/crdt.rs wire format).
+    // ?me=<rep>: the asker page's own replica number, whose batches it
+    // has and is not sent back (not the body's rep: a page may send edits
+    // restored from an earlier page load, whose stored batches it lacks).
+    // ?wait=1 with no operations: if nothing is new, the request waits
+    // (parked: src/server.rs) until something is, or WAIT_MS: others'
+    // changes are pushed, not polled for.
     fn sync(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
         let id = Site::post_id(id)?;
         let b = r.req.body;
@@ -1244,10 +1305,85 @@ impl Site {
                 })
                 .map_err(no_code)?;
         }
+        if !ops.is_empty() {
+            self.changes.bump(Kind::Doc, id);
+        }
+        let q = Form::parse(r.query.as_bytes()).ok_or(400u16)?;
+        let wait = ops.is_empty() && q.get("wait") == Some("1");
+        // (Only ever leaves the asker's own data out: anything is safe here.)
+        let mine = q.num("me").unwrap_or(0).min(u32::MAX as u64) as u32;
+        // (Noted before the database is read: a change committed after the
+        // read moves it, and wakes the wait.)
+        let seen = self.changes.get(Kind::Doc, id);
         let mut body = Vec::new();
-        self.docs.reply(&mut self.st, id, since, &mut body).map_err(no_code)?;
+        self.docs.reply(&mut self.st, id, since, mine, &mut body).map_err(no_code)?;
+        if wait && nothing_new(&body) && self.park(r, id, Waiting::Doc { since, rep: mine }, seen) {
+            return Ok(());
+        }
         resp::whole(out, 200, "application/octet-stream", Cache::NoStore, None, b"", &body, true);
         Ok(())
+    }
+
+    /// Parks this request until the post changes (seen: its counter
+    /// before the database was read). False: too many wait already.
+    fn park(&mut self, r: &mut R, post: u64, what: Waiting, seen: u32) -> bool {
+        let uid = r.uid();
+        // (Readers signed out count as one user: 0.)
+        if self.waits.len() >= WAITS_MAX || self.waits.iter().filter(|w| w.uid == uid).count() >= if uid == 0 { WAITS_MAX / 2 } else { WAITS_PER_USER } {
+            return false;
+        }
+        self.waits.push(Wait { conn: r.cx.conn, post, uid, what, seen, until: r.cx.mono_ms + self.conf.wait_ms });
+        r.cx.park = true;
+        true
+    }
+
+    /// Answers the waiting requests whose post changed, or whose time is
+    /// up (now: monotonic ms). Whether the asker may still see the post
+    /// (or edit it) is decided again: it may have changed meanwhile.
+    fn answer_waits(&mut self, now: u64, answers: &mut Vec<(u64, Vec<u8>)>) {
+        let mut i = 0;
+        while i < self.waits.len() {
+            let w = &self.waits[i];
+            let cur = self.changes.get(w.what.kind(), w.post);
+            if cur == w.seen && now < w.until {
+                i += 1;
+                continue;
+            }
+            let (conn, post, uid, late) = (w.conn, w.post, w.uid, now >= w.until);
+            let mut out = Vec::new();
+            let answered = match self.waits[i].what {
+                Waiting::Doc { since, rep } => self.doc_answer(post, uid, since, rep, late, &mut out),
+                Waiting::Comments { after, n } => self.comments_answer(post, uid, after, n, late, &mut out),
+            };
+            if !answered {
+                // (Another post's change, the counter being shared, or the
+                // asker's own.)
+                self.waits[i].seen = cur;
+                i += 1;
+                continue;
+            }
+            answers.push((conn, out));
+            self.waits.swap_remove(i);
+        }
+    }
+
+    /// A parked sync's answer, if there is one to give (late: its time is up).
+    fn doc_answer(&mut self, post: u64, uid: u64, since: i64, rep: u32, late: bool, out: &mut Vec<u8>) -> bool {
+        let allowed = self.st.facts(uid, 0, post).ok().and_then(|f| authorize(f, Action::EditPost { post }));
+        if allowed.is_none() {
+            crate::server::error(out, 403);
+            return true;
+        }
+        let mut body = Vec::new();
+        if self.docs.reply(&mut self.st, post, since, rep, &mut body).is_err() {
+            crate::server::error(out, 503);
+            return true;
+        }
+        if nothing_new(&body) && !late {
+            return false;
+        }
+        resp::whole(out, 200, "application/octet-stream", Cache::NoStore, None, b"", &body, true);
+        true
     }
 
     // COMMENTS AND LIKES (Datastar: every form and link also works without
@@ -1322,13 +1458,13 @@ impl Site {
 
     /// Comments after `after` as patches (each into its parent's replies, or
     /// the thread), the cursor moved, and extra patches first.
-    fn comments_after(&mut self, r: &R, pid: u64, after: u64, moderator: bool, extra: &[(String, &'static str, Vec<u8>)], out: &mut Vec<u8>) -> Res {
-        let cs = self.comment_rows(Q::CommentsAfter, &[Val::Int(pid as i64), Val::Int(after as i64), Val::Int(200)], r.uid(), moderator)?;
+    fn comments_after(&mut self, uid: u64, signed_in: bool, pid: u64, after: u64, moderator: bool, extra: &[(String, &'static str, Vec<u8>)], out: &mut Vec<u8>) -> Res {
+        let cs = self.comment_rows(Q::CommentsAfter, &[Val::Int(pid as i64), Val::Int(after as i64), Val::Int(200)], uid, moderator)?;
         let mut ps: Vec<(String, &'static str, Vec<u8>)> = extra.to_vec();
         let mut last = after;
         for c in &cs {
             let mut h = H::new(String::new());
-            pages::comment_live(&mut h, c, r.signed_in());
+            pages::comment_live(&mut h, c, signed_in);
             let target = if c.parent == 0 { "#thread".to_string() } else { format!("#r{}", c.parent) };
             ps.push((target, "append", h.b));
             last = c.id;
@@ -1341,14 +1477,50 @@ impl Site {
         Ok(())
     }
 
+    // LIVE COMMENTS: the request waits (parked) until someone comments, or
+    // WAIT_MS; its answer brings the new comments and the next request.
     fn live(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
         let (pid, moderator) = self.public_post(r, id)?;
         let q = Form::parse(r.query.as_bytes()).ok_or(400u16)?;
         let after = q.num("after").unwrap_or(0);
         let n = q.num("n").unwrap_or(0);
+        let seen = self.changes.get(Kind::Comments, pid);
+        let none = self.st.one(Q::CommentsAfter, &[Val::Int(pid as i64), Val::Int(after as i64), Val::Int(1)]).map_err(db_code)?.is_none();
+        if none && self.park(r, pid, Waiting::Comments { after, n }, seen) {
+            return Ok(());
+        }
+        // (Not waiting here, when too many are: the next request after a pause.)
         let mut h = H::new(String::new());
-        pages::live(&mut h, pid, n + 1);
-        self.comments_after(r, pid, after, moderator, &[("#live".into(), "outer", h.b)], out)
+        pages::live(&mut h, pid, n + 1, if none { LIVE_PAUSE } else { LIVE_NEXT });
+        self.comments_after(r.uid(), r.signed_in(), pid, after, moderator, &[("#live".into(), "outer", h.b)], out)
+    }
+
+    /// A parked live request's answer, if there is one to give.
+    fn comments_answer(&mut self, pid: u64, uid: u64, after: u64, n: u64, late: bool, out: &mut Vec<u8>) -> bool {
+        let f = match self.st.facts(uid, 0, pid) {
+            Ok(f) => f,
+            Err(_) => {
+                crate::server::error(out, 503);
+                return true;
+            }
+        };
+        let moderator = f.role.is_some();
+        let published = f.post.as_ref().is_some_and(|x| x.published);
+        if authorize(f, Action::ReadPost { post: pid }).is_none() || !published {
+            crate::server::error(out, 404);
+            return true;
+        }
+        let none = matches!(self.st.one(Q::CommentsAfter, &[Val::Int(pid as i64), Val::Int(after as i64), Val::Int(1)]), Ok(None));
+        if none && !late {
+            return false;
+        }
+        let mut h = H::new(String::new());
+        pages::live(&mut h, pid, n + 1, LIVE_NEXT);
+        if self.comments_after(uid, uid != 0, pid, after, moderator, &[("#live".into(), "outer", h.b)], out).is_err() {
+            out.clear();
+            crate::server::error(out, 503);
+        }
+        true
     }
 
     fn more(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
@@ -1433,6 +1605,7 @@ impl Site {
                 Ok(cid)
             })
             .map_err(no_code)?;
+        self.changes.bump(Kind::Comments, pid);
         if r.ds {
             // The box emptied (a reply's closed), then everything new.
             let mut h = H::new(String::new());
@@ -1443,7 +1616,7 @@ impl Site {
                 vec![(format!("#rf{parent}"), "inner", Vec::new())]
             };
             let after = f.num("after").unwrap_or(0);
-            return self.comments_after(r, pid, after, moderator, &extra, out);
+            return self.comments_after(r.uid(), r.signed_in(), pid, after, moderator, &extra, out);
         }
         let back = self.post_url(pid)?;
         resp::redirect(out, &format!("{back}#c{cid}"), b"");
@@ -1624,7 +1797,19 @@ fn json_str(j: &mut String, s: &str) {
     j.push('"');
 }
 
+/// A sync reply with nothing in it: no snapshot, no batches (from others),
+/// no more to come.
+fn nothing_new(body: &[u8]) -> bool {
+    body.len() == 10 && body[0] == 0 && body[9] == 0
+}
+
 impl App for Site {
+    fn ready(&mut self, now_ms: u64, answers: &mut Vec<(u64, Vec<u8>)>) {
+        if !self.waits.is_empty() {
+            self.answer_waits(now_ms, answers);
+        }
+    }
+
     fn handle(&mut self, req: &Request, cx: &mut Ctx, out: &mut Vec<u8>) -> bool {
         let now = cx.now_ms;
         self.sweep(now);

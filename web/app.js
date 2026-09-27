@@ -126,3 +126,17 @@ document.addEventListener("click", (ev) => {
     if (!ok) location.assign(a.href);
   }, () => location.assign(a.href));
 });
+
+// A comment may arrive twice: the answer to your own comment and the live
+// answer (the server pushes new comments as they come) can cross. Each is
+// kept once, the first (comments have ids c<number>).
+const thread = document.getElementById("thread");
+if (thread) {
+  new MutationObserver((records) => {
+    for (const r of records) {
+      for (const n of r.addedNodes) {
+        if (n.nodeType === 1 && /^c\d+$/.test(n.id) && document.querySelectorAll("#" + n.id).length > 1) n.remove();
+      }
+    }
+  }).observe(thread, { childList: true, subtree: true });
+}

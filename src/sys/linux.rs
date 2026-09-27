@@ -46,6 +46,7 @@ extern "C" {
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn prctl(option: c_int, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> c_int;
     fn getppid() -> c_int;
+    fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut c_void;
     fn __errno_location() -> *mut c_int;
 }
 
@@ -137,6 +138,27 @@ pub fn die_with_parent(parent: i32) {
             std::process::exit(0);
         }
     }
+}
+
+/// n counters (zero) in memory shared with the processes forked after
+/// this: worker processes tell each other what changed (src/notify.rs).
+/// Never unmapped: they last as long as the process.
+pub fn shared_counters(n: usize) -> Result<&'static [std::sync::atomic::AtomicU32], c_int> {
+    const PROT_READ: c_int = 1;
+    const PROT_WRITE: c_int = 2;
+    const MAP_SHARED: c_int = 1;
+    const MAP_ANONYMOUS: c_int = 0x20;
+    // SAFETY: a new anonymous mapping (no address given, no file); the
+    // kernel checks the length.
+    let p = unsafe { mmap(std::ptr::null_mut(), n * 4, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) };
+    if p as isize == -1 || p.is_null() {
+        return Err(errno());
+    }
+    // SAFETY: p is page-aligned and n * 4 bytes, readable, writable and
+    // zeroed, and never unmapped, so a 'static slice of it stays valid.
+    // AtomicU32 has u32's size and alignment, and zero is a valid value;
+    // it is only ever used through the atomics (any process may change it).
+    Ok(unsafe { std::slice::from_raw_parts(p as *const std::sync::atomic::AtomicU32, n) })
 }
 
 pub fn parent_pid() -> i32 {

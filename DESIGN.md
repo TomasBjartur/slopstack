@@ -64,8 +64,19 @@ none is planned.
   fixed pools sized at start). They share only the database: every cache
   is keyed by what the database says (a post's update time, a feed
   generation bumped by triggers, the last stored batch of a document).
-  (Planned and not built: a shared-memory page for counters, which the
-  database's generations made unnecessary.)
+  Besides it, one shared-memory page of change counters per post (made
+  before the fork, `src/notify.rs`): a worker bumps a post's after
+  committing a change, and requests waiting for that post, on any worker,
+  are answered.
+- **Pushed changes (long polling)**: a request may be parked
+  (`Ctx::park`): the loop keeps the connection, holding no buffer, and
+  asks the application every 20 ms (`App::ready`) for answers, named by
+  slot and generation so none reaches a later connection in the slot. The
+  editor keeps one sync request waiting (`?wait=1`), and a post page one
+  live-comments request; each is answered when its post changes or after
+  25 s, with the reader's rights decided again. Chosen over server-sent
+  events: an ordinary request and answer, through any proxy, with no
+  second protocol in the loop.
 - **Work on the loop**: every request's work runs on its worker's loop,
   bounded by the limits and a query deadline; rendering a novel (about
   200 ms, then cached) is the longest. (Planned and not built: helper

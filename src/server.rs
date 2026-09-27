@@ -13,6 +13,12 @@
 //   the newcomer (its owner gets 408): slow senders cannot lock readers out;
 // - output a client has not taken yet (it reads slowly), PENDING_MAX
 //   buffers. None left: that connection is closed.
+//
+// A request may be parked: the application answers it later (an editor
+// waiting for others' changes: long polling). Its connection then holds
+// no buffer; a client that goes away or sends more meanwhile is closed.
+// The answer names the connection by slot and generation (each accept
+// makes a new one), so it never reaches a later connection in the slot.
 use crate::http::{parse, Parsed};
 use crate::io::{Io, IoEvent, Rd, Wr, LISTENER};
 use crate::limits::*;
@@ -51,13 +57,25 @@ impl<'a> Request<'a> {
 pub struct Ctx<'a> {
     /// Wall-clock time (Io::wall_ms): what the application stores.
     pub now_ms: u64,
+    /// Monotonic time (Io::now_ms): how long to wait.
+    pub mono_ms: u64,
     pub random: &'a mut dyn FnMut(&mut [u8]),
+    /// This connection (slot and generation), for a parked request's answer.
+    pub conn: u64,
+    /// Set by the application: no answer now (out is ignored); it comes
+    /// from App::ready, for conn.
+    pub park: bool,
 }
 
 /// What the server asks of the application: a whole response in out.
 /// Answers whether the connection may stay open.
 pub trait App {
     fn handle(&mut self, req: &Request, cx: &mut Ctx, out: &mut Vec<u8>) -> bool;
+
+    /// Answers to parked requests that can be answered now (monotonic
+    /// time now_ms): (conn, the whole response). Asked every turn while
+    /// any are parked.
+    fn ready(&mut self, _now_ms: u64, _answers: &mut Vec<(u64, Vec<u8>)>) {}
 }
 
 #[derive(Clone, Copy)]
@@ -73,13 +91,17 @@ struct Slot {
     sent: u32,
     /// Close once the output is sent.
     close_after: bool,
+    /// Parked: the application answers later (since_ms: since when).
+    parked: bool,
+    /// Which connection this is in the slot (a new one each accept).
+    gen: u32,
     /// A request whose body is arriving (index into bodies): it holds the
     /// head and body, filled up to `filled` of `need` bytes.
     body: u32,
     need: u32,
 }
 
-const FREE_SLOT: Slot = Slot { open: false, since_ms: 0, head: NONE, filled: 0, out: NONE, sent: 0, close_after: false, body: NONE, need: 0 };
+const FREE_SLOT: Slot = Slot { open: false, since_ms: 0, head: NONE, filled: 0, out: NONE, sent: 0, close_after: false, parked: false, gen: 0, body: NONE, need: 0 };
 
 /// Where a connection's input is: the shared scratch buffer, its head
 /// buffer, or its body buffer.
@@ -120,6 +142,8 @@ pub struct Stats {
     pub refused: u64,
     pub timed_out: u64,
     pub evicted: u64,
+    pub parked: u64,
+    pub answered: u64,
 }
 
 /// A head buffer's bytes (by id: small, or BIG | index).
@@ -172,6 +196,9 @@ pub struct Server<I: Io, A: App> {
     open: usize,
     pending_bytes: usize,
     next_sweep_ms: u64,
+    /// Slots parked now.
+    parked: usize,
+    answers: Vec<(u64, Vec<u8>)>,
     pub stats: Stats,
 }
 
@@ -196,7 +223,9 @@ impl<I: Io, A: App> Server<I, A> {
             open: 0,
             pending_bytes: 0,
             next_sweep_ms: 0,
-            stats: Stats { accepted: 0, requests: 0, refused: 0, timed_out: 0, evicted: 0 },
+            parked: 0,
+            answers: Vec::new(),
+            stats: Stats { accepted: 0, requests: 0, refused: 0, timed_out: 0, evicted: 0, parked: 0, answered: 0 },
         }
     }
 
@@ -209,11 +238,17 @@ impl<I: Io, A: App> Server<I, A> {
         (self.small.used() + self.big.used(), PENDING_MAX - self.free_pending.len())
     }
 
+    /// Requests parked now.
+    pub fn parked(&self) -> usize {
+        self.parked
+    }
+
     /// One turn: wait for events (at most wait_ms), handle them, and time
     /// out connections that are too slow.
     pub fn turn(&mut self, wait_ms: u64) {
         let mut evs = std::mem::take(&mut self.events);
         evs.clear();
+        let wait_ms = if self.parked > 0 { wait_ms.min(PARK_TICK_MS) } else { wait_ms };
         self.io.wait(&mut evs, wait_ms);
         for e in &evs {
             if e.slot == LISTENER {
@@ -229,6 +264,14 @@ impl<I: Io, A: App> Server<I, A> {
         }
         self.events = evs;
         let now = self.io.now_ms();
+        if self.parked > 0 {
+            let mut answers = std::mem::take(&mut self.answers);
+            self.app.ready(now, &mut answers);
+            for (conn, resp) in answers.drain(..) {
+                self.answer(conn, resp);
+            }
+            self.answers = answers;
+        }
         if now >= self.next_sweep_ms {
             self.next_sweep_ms = now + 1000;
             self.sweep(now);
@@ -250,7 +293,8 @@ impl<I: Io, A: App> Server<I, A> {
                 return;
             }
             let now = self.io.now_ms();
-            self.slots[slot as usize] = Slot { open: true, since_ms: now, ..FREE_SLOT };
+            let gen = self.slots[slot as usize].gen.wrapping_add(1);
+            self.slots[slot as usize] = Slot { open: true, since_ms: now, gen, ..FREE_SLOT };
             self.open += 1;
             self.stats.accepted += 1;
         }
@@ -266,7 +310,10 @@ impl<I: Io, A: App> Server<I, A> {
         if s.out != NONE {
             self.release_pending(s.out);
         }
-        self.slots[slot as usize] = FREE_SLOT;
+        if s.parked {
+            self.parked -= 1;
+        }
+        self.slots[slot as usize] = Slot { gen: s.gen, ..FREE_SLOT };
         self.io.close(slot);
         self.free_slots.push(slot);
         self.open -= 1;
@@ -411,6 +458,14 @@ impl<I: Io, A: App> Server<I, A> {
 
     /// Reads what there is and answers every whole request in it, in order.
     fn readable(&mut self, slot: u32) {
+        if self.slots[slot as usize].parked {
+            // Waiting for its answer: nothing should come; gone or more is closed.
+            let r = self.io.read(slot, &mut self.scratch[..1]);
+            if !matches!(r, Rd::Later) {
+                self.close(slot);
+            }
+            return;
+        }
         loop {
             let s = self.slots[slot as usize];
             if !s.open || s.out != NONE {
@@ -523,7 +578,8 @@ impl<I: Io, A: App> Server<I, A> {
             }
             self.stats.requests += 1;
             let now = self.io.now_ms();
-            let keep = {
+            let conn = (slot as u64) << 32 | self.slots[slot as usize].gen as u64;
+            let (keep, park) = {
                 let buf: &[u8] = match src {
                     Src::Scratch => &self.scratch[..total],
                     Src::Head(id) => &held(&self.small, &self.big, id)[..total],
@@ -536,8 +592,9 @@ impl<I: Io, A: App> Server<I, A> {
                 let io = &mut self.io;
                 let wall = io.wall_ms();
                 let mut random = |b: &mut [u8]| io.random(b);
-                let mut cx = Ctx { now_ms: wall, random: &mut random };
-                self.app.handle(&req, &mut cx, &mut self.resp) && !wants_close
+                let mut cx = Ctx { now_ms: wall, mono_ms: now, random: &mut random, conn, park: false };
+                let keep = self.app.handle(&req, &mut cx, &mut self.resp) && !wants_close;
+                (keep, cx.park)
             };
             // The rest of the input (pipelined requests) to the front.
             let rest = len - total;
@@ -555,6 +612,21 @@ impl<I: Io, A: App> Server<I, A> {
             len = rest;
             self.slots[slot as usize].since_ms = now;
             self.slots[slot as usize].close_after = !keep;
+            if park {
+                // (Nothing may follow a parked request: its answer is not
+                // known yet, and answers go in order.)
+                if rest > 0 {
+                    self.close(slot);
+                    return false;
+                }
+                if let Src::Head(_) = src {
+                    self.drop_head(slot);
+                }
+                self.slots[slot as usize].parked = true;
+                self.parked += 1;
+                self.stats.parked += 1;
+                return false;
+            }
             if !self.send(slot) || !keep {
                 return false;
             }
@@ -581,6 +653,27 @@ impl<I: Io, A: App> Server<I, A> {
                 return true;
             }
         }
+    }
+
+    /// The answer to a parked request (conn: slot and generation); none
+    /// if that connection is gone.
+    fn answer(&mut self, conn: u64, resp: Vec<u8>) {
+        let (slot, gen) = ((conn >> 32) as u32, conn as u32);
+        if slot as usize >= CONN_MAX {
+            return;
+        }
+        let s = self.slots[slot as usize];
+        if !s.open || !s.parked || s.gen != gen {
+            return;
+        }
+        self.slots[slot as usize].parked = false;
+        self.parked -= 1;
+        self.stats.answered += 1;
+        self.slots[slot as usize].since_ms = self.io.now_ms();
+        self.resp.clear();
+        self.resp.extend_from_slice(&resp);
+        // (Anything sent while it was parked closed it: nothing waits to be read.)
+        self.send(slot);
     }
 
     fn fail(&mut self, slot: u32, code: u16) {
@@ -676,7 +769,9 @@ impl<I: Io, A: App> Server<I, A> {
             if !s.open {
                 continue;
             }
-            let late = if s.body != NONE {
+            let late = if s.parked {
+                now >= s.since_ms + PARK_TIMEOUT_MS
+            } else if s.body != NONE {
                 // A body: after HEAD_TIMEOUT_MS, at least BODY_MIN_RATE a second.
                 let t = now.saturating_sub(s.since_ms);
                 t >= HEAD_TIMEOUT_MS && (s.filled as u64) < (t - HEAD_TIMEOUT_MS) / 1000 * BODY_MIN_RATE

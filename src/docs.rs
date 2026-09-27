@@ -136,7 +136,7 @@ impl Docs {
             self.forget(post);
             return Err(No::Conflict);
         }
-        st.run(Q::OpsAdd, &[Val::Int(post as i64), Val::Blob(batch)])?;
+        st.run(Q::OpsAdd, &[Val::Int(post as i64), Val::Blob(batch), Val::Int(rep as i64)])?;
         let seq = st.db.last_rowid();
         let l = self.map.get_mut(&post).expect("loaded");
         l.seq = seq;
@@ -176,8 +176,9 @@ impl Docs {
     /// up to REPLY_MAX bytes. Format: kind (0: batches only, 1: snapshot
     /// first), the last seq included (u64), more (1: ask again at once),
     /// then for kind 1 the snapshot's length (u32) and bytes, then the
-    /// batches' operations one after another.
-    pub fn reply(&mut self, st: &mut Store, post: u64, since: i64, out: &mut Vec<u8>) -> Result<(), No> {
+    /// batches' operations one after another. Batches stored by replica
+    /// `mine` (the asker's own: it has them) are left out, not stopped at.
+    pub fn reply(&mut self, st: &mut Store, post: u64, since: i64, mine: u32, out: &mut Vec<u8>) -> Result<(), No> {
         self.get(st, post)?;
         let mut snap: Option<(i64, Vec<u8>)> = None;
         if since == 0 {
@@ -199,7 +200,9 @@ impl Docs {
             let mut got = 0;
             st.q(Q::OpsSince, &[Val::Int(post as i64), Val::Int(last), Val::Int(256)], |r| {
                 if out.len() - start < REPLY_MAX {
-                    out.extend_from_slice(r.bytes(1));
+                    if r.int(2) != mine as i64 {
+                        out.extend_from_slice(r.bytes(1));
+                    }
                     last = r.int(0);
                     got += 1;
                 } else {
@@ -237,7 +240,7 @@ impl Docs {
         let del = u16(&old[p..a.len() - s]);
         let mut batch = vec![];
         doc.edit(crdt::SERVER_REP, pos, del, &text[p..b.len() - s], &mut batch).map_err(|_| No::Error)?;
-        st.run(Q::OpsAdd, &[Val::Int(post as i64), Val::Blob(&batch)])?;
+        st.run(Q::OpsAdd, &[Val::Int(post as i64), Val::Blob(&batch), Val::Int(crdt::SERVER_REP as i64)])?;
         let seq = st.db.last_rowid();
         self.map.get_mut(&post).expect("loaded").seq = seq;
         self.snapshot_if_due(st, post)

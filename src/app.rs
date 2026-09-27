@@ -1,13 +1,48 @@
-// The application (for now: the spike's pages). GET /echo/<x> answers <x>
-// (tests check order with it); GET / a small page; HEAD as GET without
-// the body.
+// The application the event loop is tested with (tests/sim.rs). GET
+// /echo/<x> answers <x> (tests check order with it); GET /park/<ms>/<x>
+// answers <x> after ms (parked meanwhile; "never": not answered); GET / a
+// small page; HEAD as GET without the body.
 use crate::server::{error, App, Ctx, Request};
 
-pub struct Site;
+#[derive(Default)]
+pub struct Site {
+    /// Parked requests: (connection, when to answer, the answer's body).
+    parked: Vec<(u64, u64, Vec<u8>)>,
+}
+
+fn ok(out: &mut Vec<u8>, body: &[u8], head: bool) {
+    out.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
+    let mut n = [0u8; 20];
+    out.extend_from_slice(itoa(body.len() as u64, &mut n));
+    out.extend_from_slice(b"\r\n\r\n");
+    if !head {
+        out.extend_from_slice(body);
+    }
+}
 
 impl App for Site {
-    fn handle(&mut self, req: &Request, _cx: &mut Ctx, out: &mut Vec<u8>) -> bool {
+    fn ready(&mut self, now_ms: u64, answers: &mut Vec<(u64, Vec<u8>)>) {
+        self.parked.retain(|(conn, due, body)| {
+            if now_ms < *due {
+                return true;
+            }
+            let mut out = vec![];
+            ok(&mut out, body, false);
+            answers.push((*conn, out));
+            false
+        });
+    }
+
+    fn handle(&mut self, req: &Request, cx: &mut Ctx, out: &mut Vec<u8>) -> bool {
         let head = req.method == b"HEAD";
+        if let Some(rest) = req.target.strip_prefix(b"/park/") {
+            let text = std::str::from_utf8(rest).unwrap_or("");
+            let (ms, x) = text.split_once('/').unwrap_or(("0", ""));
+            let due = if ms == "never" { u64::MAX } else { cx.mono_ms + ms.parse::<u64>().unwrap_or(0) };
+            self.parked.push((cx.conn, due, x.as_bytes().to_vec()));
+            cx.park = true;
+            return true;
+        }
         if req.method == b"POST" {
             // (Tests: the body back.)
             if req.target == b"/echo" {
@@ -29,13 +64,7 @@ impl App for Site {
             error(out, 404);
             return true;
         };
-        out.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ");
-        let mut n = [0u8; 20];
-        out.extend_from_slice(itoa(body.len() as u64, &mut n));
-        out.extend_from_slice(b"\r\n\r\n");
-        if !head {
-            out.extend_from_slice(body);
-        }
+        ok(out, body, head);
         true
     }
 }

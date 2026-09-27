@@ -595,11 +595,12 @@ pub fn comment_box(h: &mut H, pid: u64, parent: u64, id: &'static str, label: &'
 }
 
 /// The element that keeps comments coming: each answer replaces it with
-/// the next request (after: the last comment shown; delay: wait first).
-/// (The last comment shown is the signal cafter: live answers and sent
-/// comments both bring everything after it, and move it.)
-pub fn live(h: &mut H, pid: u64, n: u64) {
-    h.r("<div id=\"live\" data-init__delay.10s=\"@get('/live/").n(pid).r("?n=").n(n)
+/// the next request (after: the last comment shown), sent after delay.
+/// The server holds each request until someone comments (src/site.rs
+/// live). (The last comment shown is the signal cafter: live answers and
+/// sent comments both bring everything after it, and move it.)
+pub fn live(h: &mut H, pid: u64, n: u64, delay: &'static str) {
+    h.r("<div id=\"live\" data-init__delay.").r(delay).r("=\"@get('/live/").n(pid).r("?n=").n(n)
         .r("&amp;after=' + $cafter, {requestCancellation: 'cleanup'})\"></div>");
 }
 
@@ -616,7 +617,7 @@ pub fn comments(h: &mut H, signed_in: bool, pid: u64, cs: &[CommentView], more_a
     } else {
         h.r("<p class=\"muted\"><a href=\"/login\">Log in</a> or <a href=\"/signup\">sign up</a> to comment.</p>");
     }
-    live(h, pid, 0);
+    live(h, pid, 0, "1s");
     h.r("<div id=\"thread\">");
     thread(h, cs, signed_in);
     if let Some(a) = more_after {

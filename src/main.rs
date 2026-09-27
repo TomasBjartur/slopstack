@@ -34,6 +34,7 @@ pub mod assets;
 pub mod pages;
 pub mod site;
 pub mod docs;
+pub mod notify;
 pub mod sim;
 pub mod tests {
     pub mod crdt;
@@ -106,14 +107,16 @@ fn run() {
     drop(db::Store::open(&path).unwrap_or_else(|e| panic!("cannot open {path}: {e:?}")));
     let listener = sys::linux::listen_loopback(port, 4096).unwrap_or_else(|e| panic!("cannot listen on {port}: errno {e}"));
     eprintln!("listening on 127.0.0.1:{port} ({workers} worker(s))");
+    // What changed, shared by the workers (made before they are forked).
+    let changes = notify::Changes::shared();
     if workers == 1 {
-        serve(listener, false, &path, port);
+        serve(listener, false, &path, port, changes);
     }
     let me = std::process::id() as i32;
     let spawn = || match sys::linux::fork_process() {
         Ok(0) => {
             sys::linux::die_with_parent(me);
-            serve(listener, true, &path, port);
+            serve(listener, true, &path, port, changes);
         }
         Ok(pid) => pid,
         Err(e) => panic!("fork: errno {e}"),
@@ -131,9 +134,9 @@ fn run() {
     }
 }
 
-fn serve(listener: sys::linux::fd, shared: bool, path: &str, port: u16) -> ! {
+fn serve(listener: sys::linux::fd, shared: bool, path: &str, port: u16, changes: notify::Changes) -> ! {
     let st = db::Store::open(path).unwrap_or_else(|e| panic!("cannot open {path}: {e:?}"));
-    let site = site::Site::new(st, site::Conf::from_env(port));
+    let site = site::Site::new(st, site::Conf::from_env(port), changes);
     let io = io::LinuxIo::on(listener, shared).unwrap_or_else(|e| panic!("epoll: errno {e}"));
     let mut s = server::Server::new(io, site);
     loop {

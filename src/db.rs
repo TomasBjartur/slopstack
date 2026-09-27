@@ -176,6 +176,9 @@ pub const MIGRATIONS: &[&str] = &[
        window_ms INTEGER NOT NULL,
        n INTEGER NOT NULL CHECK (n >= 0)
      ) STRICT;",
+    // v2: which replica number stored each batch (0: before this), so an
+    // editor is not sent its own changes back (src/docs.rs reply).
+    "ALTER TABLE doc_ops ADD COLUMN rep INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// Brings the schema up to date (each migration in its own transaction).
@@ -270,8 +273,8 @@ queries! {
     PostBody => "SELECT body_md FROM post WHERE id = ?1",
     AuthorPosts => "SELECT p.slug, p.title, p.published_ms, b.slug, b.title, coalesce(u.name, ''), coalesce(u.id, 0), p.words, coalesce(u.handle, '') FROM post p JOIN blog b ON b.id = p.blog_id LEFT JOIN user u ON u.id = p.author_id WHERE p.author_id = ?1 AND p.published = 1 ORDER BY p.published_ms DESC LIMIT ?2 OFFSET ?3",
     Recent => "SELECT p.slug, p.title, p.published_ms, b.slug, b.title, coalesce(u.name, ''), coalesce(u.id, 0), p.words, coalesce(u.handle, '') FROM post p JOIN blog b ON b.id = p.blog_id LEFT JOIN user u ON u.id = p.author_id WHERE p.published = 1 ORDER BY p.published_ms DESC LIMIT ?1 OFFSET ?2",
-    OpsSince => "SELECT seq, data FROM doc_ops WHERE post_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
-    OpsAdd => "INSERT INTO doc_ops(post_id, data) VALUES (?1, ?2)",
+    OpsSince => "SELECT seq, data, rep FROM doc_ops WHERE post_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+    OpsAdd => "INSERT INTO doc_ops(post_id, data, rep) VALUES (?1, ?2, ?3)",
     OpsCount => "SELECT coalesce(sum(length(data)), 0), count(*) FROM doc_ops WHERE post_id = ?1 AND seq > ?2",
     SnapGet => "SELECT upto, data FROM doc_snap WHERE post_id = ?1",
     SnapPut => "INSERT INTO doc_snap(post_id, upto, data, size) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(post_id) DO UPDATE SET upto = ?2, data = ?3, size = ?4",
