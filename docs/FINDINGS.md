@@ -131,6 +131,28 @@ version, found the two worst bugs in this one within minutes.
   home page, 0.8% on a post page and 1.8% on a post with 20 comments; the
   kernel's networking and SQLite take most of the rest. Removing them
   would gain at most about 2%.
+- **The CRDT's proof is close to trivial.** `lean/Fugue.lean` defines the
+  text from the sorted set of elements; convergence and the merge laws
+  then say that a function of a set gives the same answer for the same
+  set. It would accept a CRDT that puts every character in the wrong
+  place, or drops some (the walk silently skips an element whose parent
+  is missing). What users rely on (an edit lands where it was made;
+  concurrent runs do not interleave; every character appears once) is
+  tested, not proved. Label: proved about a model, of little power.
+- **The simulator covers the event loop, not the application.** It found
+  three bugs no other test could reach (a slowloris locking readers out
+  of head buffers; evicting a connection losing its output; memory at
+  100,000 connections) and made parked requests safe to add (both guards
+  mutation-checked). But it runs a small echo application: none of the
+  application's bugs (dates in monotonic time, a reused id, a writer not
+  sent an earlier page's edits) could appear in it.
+- **Thesis 2, so far.** Proofs found no bugs; the bugs were around them.
+  What found bugs: the simulator, real browsers, differential tests, the
+  red team. What the proofs gave that tests could not: the markup law for
+  any input, and design pressure towards types that make wrong states
+  unwritable (the most useful effect). "Most of a real web app can carry
+  proofs" is not what we found; a small core can, and should, and the
+  rest is best served by deterministic simulation (DESIGN.md).
 - **Reading a profile wrong.** Totals over ten keys were read as costs
   per key (27 ms of WebAssembly "a key" was one 27 ms first edit). The
   fix it pointed at was still right, but the claimed gain was not; timing

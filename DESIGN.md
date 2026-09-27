@@ -87,12 +87,12 @@ none is planned.
   thread pool, to save one pause of under 100 ms per update of a novel.
   If such pauses come to matter (many novels, many updates), the parked
   requests of the event loop are the place to start.
-- **All I/O behind a trait** (`Io`: accept, read, write, close, timers,
-  clock, randomness, the database). Production implements it with
-  syscalls; the **simulator** implements it with a seeded model of the
-  network, the clock and crashes, and runs the whole server in one thread,
-  deterministically, under faults (drops, reordering, partial writes,
-  crashes, clock skew).
+- **The outside world behind a trait** (`Io`: accept, read, write, close,
+  the monotonic and wall clocks, randomness). Production implements it
+  with syscalls; the **simulator** (`src/sim.rs`) with a seeded model of
+  the network. Today it runs the event loop only, with a small test
+  application; the database is not behind `Io`. Running the real
+  application under it is the next step (below, "Whole-app simulation").
 - **Memory**: fixed pools allocated at start from named limits
   (connections, buffers, rows). Past a limit the answer is a clear refusal
   (503, 413, 429), never an allocation.
@@ -144,28 +144,93 @@ behaves like an app:
   version, which works) may cut inside a paragraph, so a 1.5 MB paragraph
   types as fast as short ones.
 
-## Correctness: the layers
+## Correctness: where assurance comes from
 
-1. **Laws** (`spec/`, human-owned; a change is a SECURITY DECISION in the
-   commit message): authorization, sessions, markup safety, parser bounds
-   and limits, write budgets, CRDT merge laws. Stated with their own
-   predicates, never the code's; each one mutation-tested (a deliberately
-   broken version must fail it).
-2. **Verus proofs** that the code meets the laws; **Lean** for the CRDT
-   model (convergence under any delivery order); **Kani** for `unsafe`.
-3. **Differential tests**: every fast implementation against a slow,
-   obviously correct reference (the CRDT runs against the Lean model's
-   executable version).
-4. **Property tests and fuzzing** with our own seeded generators.
-5. **Deterministic simulation** of the whole server under faults.
-6. **Browser tests** that act as people do (keyboard, mouse, two writers,
-   offline, input methods, a phone, a throttled CPU).
-7. **Performance budgets as tests**, at ten times the worst case (below).
-8. **Adversarial review**: a separate pass that attacks the code and the
-   laws.
+What this project has shown (docs/FINDINGS.md): no bug was ever found in
+proved code, and every bug found lived around it; the simulator and
+real-browser tests found them. So, in order of where effort goes:
+
+1. **Deterministic simulation is the default test.** The server, its
+   clients and the faults between them, driven by one seed, with
+   invariants checked throughout. A failure is a seed: it replays exactly.
+2. **Real environments check the simulator's model of the world.** Real
+   Chrome (and Safari), real proxies, the pinned Datastar: what they do is
+   what the simulator must model, and they find what no model had
+   (Chrome's offline mode does not cut a request already made; Datastar
+   sends no second request to a URL).
+3. **Types make wrong states impossible to write**: a `Permit` only
+   `authorize` makes, templates that take only static text or escape, a
+   session that needs a passed passkey check. Cheap, and the most useful
+   thing the laws led to.
+4. **Proofs for small, crisp, catastrophic kernels**: the markup
+   sanitizer (for any input), the authorization policy, the parser's
+   bounds. Not "as much as possible": a proof is kept where its law is
+   crisp and a bug would be severe.
+
+**A law is worth what it could have caught.** Each law in `spec/` names
+one plausible wrong implementation it would reject. If none comes to
+mind, the law holds by construction: it is labelled so, not counted as
+assurance. (The CRDT's convergence theorem accepts a CRDT that puts every
+character in the wrong place: it proves that a function of a set is a
+function of the set.) Laws are mutation-tested like tests are.
+
+The layers, with what exists today:
+
+| Layer | Status |
+|---|---|
+| Laws (`spec/`, human-owned; a change is a SECURITY DECISION in the commit message), stated with their own predicates, mutation-tested | built |
+| Verus proofs that the code meets them | built: parser, authorization, CSRF, write budget, markup, passkey decisions |
+| Lean model of the CRDT | built, but weak: convergence only. Planned: a local edit lands where it was made; every live character appears once |
+| Kani for `unsafe` (`src/sys/`) | planned, not used |
+| Differential tests: fast code against a slow reference | built: the CRDT against a naive walk and the Lean definitions; WebAssembly against the server's build; chunked text against strings |
+| Property tests and fuzzing (seeded) | built |
+| Deterministic simulation | the event loop only (network faults, 100,000 connections, parked requests). Planned: the whole application (below) |
+| Browser tests that act as people do | built (Chrome; Safari not automated) |
+| Performance budgets as tests, at 10x | built |
+| Adversarial review | the red-team suite (every kind of user against every route); no separate review pass yet |
 
 Every guarantee is labelled "proved about the code", "proved about a
 model", or "tested (how)".
+
+### Whole-app simulation (planned)
+
+The real application (`Site`, SQLite, the CRDT, sessions, comments) run
+by the simulator with simulated users, so the bugs found so far by hand
+in Chrome are found by seeds instead.
+
+- **Determinism.** Everything that varies comes from the seed: the
+  network and both clocks (already), randomness (already, `Ctx.random`),
+  hash maps (a seeded hasher: `HashMap`'s own order is random per process
+  and cache eviction depends on it), the database (SQLite is
+  deterministic given the same statements; a file per run, or in memory).
+- **Workers.** Several `Site`s in one process on one database and one set
+  of change counters, as the worker processes share them.
+- **Faults.** Network ones (as now); the wall clock jumping apart from the
+  monotonic one; a worker crashing mid-request and starting again (its
+  memory gone, the database kept); SQLite busy and write errors, injected
+  at `Store` by the seed.
+- **Users.** Seeded clients speaking the real protocols: editors, each
+  with a `src/crdt.rs` replica, typing, going offline, reloading with
+  unsent edits (a new replica number), restarting the browser; readers
+  and commenters; owners adding and removing authors; sign-in and
+  session expiry.
+- **Invariants, checked throughout.** Once quiet, every replica's text is
+  the server's; nobody receives a draft or a document they may not see
+  (the laws of `spec/authz.rs`, run as oracles on every request); every
+  rendered page's post and comment bodies pass the markup law; every
+  request is answered or its connection closed; sessions end on the wall
+  clock; memory stays within its limits.
+- **The simulator must find the bugs already found.** Its acceptance
+  test: put back, one at a time, the bugs in docs/FINDINGS.md that it
+  should see (dates in monotonic time; a reused id serving another post's
+  text; a writer not sent an earlier page's edits; a stale answer to a
+  reused connection), and each must fail a seed within minutes of
+  running. A simulator that misses them is modelling the wrong world.
+- **What stays in real browsers**: layout and its cost, input methods,
+  the DOM (a comment shown twice is a page fact), Datastar's behaviour,
+  Safari. The editor's sync logic (queue, send, listen, restore) could
+  later run in Node under the same kind of seeded scheduler, once it is
+  separated from the DOM.
 
 ## Principles learned in the building
 
@@ -189,6 +254,23 @@ model", or "tested (how)".
   next step: logged out while writing, "Log in"); after logging in, back
   where you were; every format turns off the way it turned on; a
   preference set is kept.
+- **Skipping data is a claim about what the client holds**, and gets a
+  test of the claim. "The writer has its own batches" was false for a
+  page sending an earlier page's kept edits: a reopened page showed
+  nothing. Prefer facts that cannot go stale (a replica number new on
+  each page load) to inferences.
+- **When latency drops, look for answers that now cross.** A comment
+  shown twice, rare while comments were polled, came every time once
+  they were pushed. Anything that can arrive twice is idempotent by id.
+- **Large shared structures are values.** The editor's chunked text is
+  never changed in place: an edit makes a copy sharing the untouched
+  chunks (`Text.with`), since Vim, the undo history and the view keep
+  earlier texts and compare them.
+- **Measurements decide fixes, including not making them.** Two planned
+  fixes were dropped once measured (rendering a novel on a helper
+  thread: 67-84 ms once per update; fewer allocations: 2% of the time),
+  and the measuring found the fix worth making (drafts re-rendered on
+  every view).
 - *Tentative*: **keep the JavaScript on the proved path small.** The
   renderer and the CRDT are Rust (proved, or checked against a proved
   model) in the browser as WebAssembly; the editor's own JavaScript

@@ -7,9 +7,14 @@ limits. This file is the working rules.
 
 - **Faster than Substack** on what readers and writers feel, measured and
   published (including where we lose).
-- **Correctness checked as hard as we can.** For every feature, ask what
-  laws it must obey and prove them (Verus about the code, Lean about
-  models); where a proof does not reach, say why and check it another way.
+- **Correctness checked as hard as we can, where bugs actually are.** For
+  every feature, ask what laws it must obey. Check them in deterministic
+  simulation first (the default test; real browsers check the
+  simulator's model of the world); make wrong states unwritable with
+  types; prove the small, crisp, severe kernels (Verus about the code,
+  Lean about models). Each law names a plausible wrong implementation it
+  would reject, or is labelled as holding by construction. See
+  DESIGN.md, "Correctness: where assurance comes from".
 - **Real and non-trivial.** Real auth, real multi-user data, real
   concurrency, production limits and error handling.
 - Record results honestly, including negative ones, in `docs/FINDINGS.md`.
@@ -33,7 +38,9 @@ CPU throttled. Sizes nobody tested are where the first version broke.
   own predicates, never the code's. Mutation-test every new law once.
 - **Label every guarantee**: proved about the code, proved about a model,
   or tested (how).
-- **All I/O goes through the `Io` trait** so the simulator can run it.
+- **All I/O goes through the `Io` trait** so the simulator can run it
+  (network, clocks, randomness today; the database and injected faults
+  are planned: DESIGN.md, "Whole-app simulation").
 - **Every loop is bounded, every buffer sized from a named limit** in
   `src/limits.rs`; exceeding one is a handled error.
 - **`unsafe` only in `src/sys/`** (syscalls, FFI), each block with a
@@ -69,6 +76,21 @@ CPU throttled. Sizes nobody tested are where the first version broke.
 - **Deploying**: back up, convert if needed, install, then check the live
   site in a real browser (a temporary session, deleted after) and write
   down the way back (`deploy/README.md`). Ask before each deploy.
+- **Measure before fixing, per unit, before and after.** Numbers per key
+  or per request, never totals over a sample (a total over ten keys was
+  once read as a cost per key). Build the old commit in a worktree and run
+  both on the same harness; an estimate is not a measurement (a novel's
+  render was guessed at 200 ms and measured at 70).
+- **Test steady activity, not only single actions.** Every sync test typed,
+  paused, then checked; none saw that a co-author got nothing during three
+  seconds of steady typing.
+- **A test is done when it fails without the fix.** Break the code on
+  purpose once (mutation) and watch the test fail; three new tests passed
+  on broken code before they were sharpened (a budget that averaged away
+  a one-time cost; a slot-reuse test with no one else parked there).
+- **Docs describe what exists.** Anything not built is marked *planned*
+  in the same sentence. (DESIGN.md described a whole-server fault
+  simulator, and Kani, that did not exist.)
 - *Tentative*: a usability pass (driving the real browser as a person
   would, with screenshots) after each larger feature. It found more real
   bugs than the ported suites; it is slow, so perhaps at milestones.
