@@ -12,6 +12,7 @@ pub mod authz;
 #[path = "../spec/markup.rs"]
 pub mod spec_markup;
 pub mod html;
+pub mod markdown;
 pub mod sys {
     pub mod linux;
     pub mod sqlite;
@@ -26,6 +27,7 @@ pub mod tests {
     pub mod crypto;
     pub mod db;
     pub mod http;
+    pub mod markdown;
     pub mod sim;
 }
 
@@ -43,6 +45,7 @@ fn run() {
             "crypto" => tests::crypto::run(),
             "db" => tests::db::run(),
             "http" => tests::http::run(),
+            "markdown" => tests::markdown::run(),
             "sim" => tests::sim::run(),
             t => panic!("no test {t}"),
         }

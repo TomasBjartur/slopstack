@@ -12,7 +12,7 @@ echo "== proofs (Verus)"
 echo "== build"
 "$VERUS" src/main.rs --no-verify --compile $LINK -C opt-level=3 -o build/server
 echo "== tests"
-for t in crypto db http sim; do
+for t in crypto db http markdown sim; do
   echo "-- $t"
   build/server test $t | tail -4
 done
