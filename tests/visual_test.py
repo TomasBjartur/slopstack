@@ -30,7 +30,7 @@ def load(md):
         br.js("document.querySelector('.edit-tools .seg:nth-child(2)').click()")
     time.sleep(0.5)
 def md():
-    return br.js(f"{ED}.view.text")
+    return br.js(f"String({ED}.view.text)")
 def select(text, start=0, end=None):
     """Selects `text` (its [start, end) part) where it first occurs in the Visual view."""
     return br.js(f"""(() => {{ const root = document.querySelector('.wys'); const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -189,7 +189,7 @@ def run():
     a = md()
     k("y", ctrl=True); time.sleep(0.4)
     check("undo: the typed words at once; redo: back", a == "One." and md() == "One. Two", (a, md()))
-    check("every change reached the document (the CRDT)", br.js(f"{ED}.doc().text() === {ED}.view.text"))
+    check("every change reached the document (the CRDT)", br.js(f"{ED}.doc().text() === String({ED}.view.text)"))
     errs = [e for e in br.ws.events if e.get("method") == "Runtime.exceptionThrown"]
     check("no errors", not errs, errs[:1])
 

@@ -256,8 +256,8 @@ def chrome_part(db, tmp, pid, did, a, b):
              const blob = await new Promise(r => c.toBlob(r, 'image/png')); const f = new File([blob], 'my photo.png', {type: 'image/png'});
              const dt = new DataTransfer(); dt.items.add(f); const t = document.getElementById('editor'); t.focus();
              t.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true})); })()""")
-        md = x.until("(document.getElementById('editor').ed.view.text.match(/!\\[[^\\]]*\\]\\(\\/img\\/[0-9a-f]{32}\\)/) || [])[0]", 10)
-        check("a pasted image uploads and goes in as Markdown", md is not None, x.js("document.getElementById('editor').ed.view.text"))
+        md = x.until("(String(document.getElementById('editor').ed.view.text).match(/!\\[[^\\]]*\\]\\(\\/img\\/[0-9a-f]{32}\\)/) || [])[0]", 10)
+        check("a pasted image uploads and goes in as Markdown", md is not None, x.js("String(document.getElementById('editor').ed.view.text)"))
         errs = [e for br in (x, y) for e in br.ws.events if e.get("method") == "Runtime.exceptionThrown"
                 or (e.get("method") == "Log.entryAdded" and e["params"]["entry"]["level"] == "error")]
         check("no errors or CSP violations in either browser", not errs, errs[:2])

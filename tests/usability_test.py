@@ -222,7 +222,7 @@ class Page:
         time.sleep(0.15)
 
     def full(self):
-        t = self.js(f"{B}.view.text")
+        t = self.js(f"String({B}.view.text)")
         return None if t is None else u16(t)
 
     def sel(self):

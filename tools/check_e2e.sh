@@ -28,7 +28,9 @@ run python3 tests/large_test.py 6000000
 for t in usability_test ux_test; do
   [ -f tests/$t.py ] && run python3 tests/$t.py
 done
+run "$NODE" tests/text_test.mjs
 run "$NODE" tests/vim_test.mjs
+run env VIM_TEXT=1 "$NODE" tests/vim_test.mjs
 run "$NODE" tests/history_test.mjs
 run "$NODE" tests/visual_split_test.mjs
 run "$NODE" tests/wasm_test.mjs

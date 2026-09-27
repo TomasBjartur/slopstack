@@ -4,7 +4,7 @@
 // character, children in id order), and each view kept up to date by the
 // reported changes alone. Also: snapshots round-trip, bad operations are
 // refused without changing anything, and the 10x performance budgets.
-use crate::crdt::{self, key, Bad, Doc, Op, Sink, LEFT, RIGHT, ROOT};
+use crate::crdt::{self, key, Bad, Doc, Op, Sink, LEFT, RIGHT, ROOT, RUN_MAX};
 use crate::sim::Rng;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -423,6 +423,52 @@ fn perf(check: &mut dyn FnMut(&str, bool)) {
     let t = Instant::now();
     let txt = d.text();
     check(&format!("the text of 60 MB: {:.0} ms", t.elapsed().as_secs_f64() * 1000.0), txt.len() > 50_000_000 && t.elapsed().as_secs_f64() < 1.0);
+    // A novel with accents (not ASCII: a character's byte in a run is
+    // found by reading the run from its start), pasted at once. Runs are
+    // capped, so the first edit at a new place reads a few KB, not the
+    // novel (uncapped: 6.7 ms here, 30 ms in the browser, at 6M).
+    let accents = "Élodie walked past the café, naïve and sure, to the fjord’s edge. ".repeat(8) + "\n\n";
+    let novel = accents.repeat(6_000_000 / accents.len());
+    let mut d = Doc::new();
+    d.edit(2, 0, 0, &novel, &mut vec![]).unwrap();
+    let longest = d.longest_run();
+    check(&format!("a pasted novel is cut into runs of at most {RUN_MAX} characters ({} runs)", d.runs()), longest <= RUN_MAX && d.text() == novel);
+    // The slowest edit: deleting and typing at 200 places, one after
+    // another (each the first edit there).
+    // (One insert first: the text buffer grows, a copy of the novel once
+    // per doubling, not a cost of the place.)
+    let worst = |d: &mut Doc| {
+        d.edit(5, d.len16(), 0, "!", &mut vec![]).unwrap();
+        let mut rng = Rng(11);
+        let mut worst = 0f64;
+        for i in 0..200 {
+            let p = rng.below(d.len16() - 1);
+            let t = Instant::now();
+            if i % 2 == 0 {
+                d.edit(5, p, 1, "", &mut vec![]).unwrap();
+            } else {
+                d.edit(5, p, 0, "é", &mut vec![]).unwrap();
+            }
+            worst = worst.max(t.elapsed().as_secs_f64() * 1e6);
+        }
+        worst
+    };
+    let us = worst(&mut d);
+    check(&format!("edits at 200 new places in a 6 MB novel with accents: the slowest {us:.0} us"), us < 1000.0);
+    // A snapshot saved before the cap (one run of the whole novel) is cut
+    // when loaded, and gives the same text.
+    let mut old = b"FUG1".to_vec();
+    old.extend_from_slice(&1u32.to_le_bytes());
+    for v in [2u32, 1, novel.chars().count() as u32, 0, 0] {
+        old.extend_from_slice(&v.to_le_bytes());
+    }
+    old.extend_from_slice(&[1, 0]);
+    old.extend_from_slice(&(novel.len() as u32).to_le_bytes());
+    old.extend_from_slice(novel.as_bytes());
+    let mut e = Doc::load(&old).unwrap();
+    check("a snapshot with one long run loads cut, the same text, in order", e.longest_run() <= RUN_MAX && e.text() == novel && e.order_ok());
+    let us = worst(&mut e);
+    check(&format!("…and editing it: the slowest edit {us:.0} us"), us < 1000.0);
     // Growth: replaying N vs 10N operations of typing (a history).
     let mut times = vec![];
     for n in [20_000u64, 200_000] {

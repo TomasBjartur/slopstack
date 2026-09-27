@@ -102,7 +102,7 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
     vimBtn.hidden = m === "visual"; // Vim is for the Markdown text
     if (m === "visual") {
       if (vimOn) vimShow(false);
-      visual.open(view.text);
+      visual.open(String(view.text)); // (Visual mode's blocks are strings)
       view.box.hidden = true;
       wys.hidden = false;
       if (focus) wys.focus();
@@ -425,7 +425,7 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
   function block(c) {
     const t = view.text;
     c = Vim.normalize(t, c);
-    const e = c < t.length && t[c] !== "\n" ? c + (t.codePointAt(c) > 0xffff ? 2 : 1) : c;
+    const e = c < t.length && t.charAt(c) !== "\n" ? c + (t.codePointAt(c) > 0xffff ? 2 : 1) : c;
     view.select(c, e, true);
   }
   function line(extra = "") {
@@ -497,7 +497,7 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
     // The whole lines the selection touches (a selection ending at a
     // line's start does not take that line).
     const ls = t.lastIndexOf("\n", s.a - 1) + 1;
-    const last = s.b > s.a && t[s.b - 1] === "\n" ? s.b - 1 : s.b;
+    const last = s.b > s.a && t.charAt(s.b - 1) === "\n" ? s.b - 1 : s.b;
     let le = t.indexOf("\n", last);
     if (le < 0) le = t.length;
     const lines = t.slice(ls, le).split("\n");
@@ -543,14 +543,14 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
   return {
     // The text changed elsewhere (another writer, a sync, undo).
     remote(text) {
-      if (mode === "visual") visual.refresh(text);
+      if (mode === "visual") visual.refresh(String(text));
     },
     // The document arrived: Visual mode shows it.
     loaded() {
       if (visualWanted && mode !== "visual") {
         visualWanted = false;
         toMode("visual", false);
-      } else if (mode === "visual") visual.refresh(view.text);
+      } else if (mode === "visual") visual.refresh(String(view.text));
     },
     visual: () => mode === "visual",
     // Images from elsewhere (the page's own button) go in at Visual mode's caret.

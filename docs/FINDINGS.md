@@ -47,7 +47,9 @@ browser, Caddy.
 | `tests/browser_test.py` | Chrome with a virtual authenticator: sign-up, login, recovery, writing | 31 |
 | `tests/collab_test.py` | two Chromes, two users, one document, offline | 16 |
 | `tests/editor_test.py` | Vim, Visual mode, round trips | 32 |
-| `tests/large_test.py` | 1M and 3M characters in the editor | 50 |
+| `tests/large_test.py` | 1M and 6M characters in the editor | 50 |
+| `tests/text_test.mjs` | the editor's chunked text against plain strings | 3,000 random edits, every method |
+| `VIM_TEXT=1 tests/vim_test.mjs` | Vim on the chunked text, cut every 3 units | the whole Vim suite |
 | `tests/workers_test.py` | 4 worker processes: freshness, documents, supervision | 7 |
 | `tests/fuzz_server.py` | mutated requests at a live server | 80,000 requests |
 
@@ -65,6 +67,7 @@ browser, Caddy.
 | Reopened in Visual mode, every block was read-only ("A long block: edit it in Markdown mode"): the mode opened before the WebAssembly renderer had loaded | using the editor in Chrome (a usability pass) | no |
 | Visual mode flattened nested lists when writing Markdown back (a sub-item's text joined its parent's) | adding Tab to nest list items | no |
 | Datastar 1.0.4 sends no second request to the same URL from the same element (replies, likes, a second co-author did nothing) | the comments test in two Chromes | no |
+| The first edit at a new place in a pasted novel with accents read the run from its start (a paste is one run): 30 ms in the browser at 6M characters, 300 ms at 60M | profiling the editor at 6M; the CRDT's own budget test had used ASCII text, whose byte offsets need no reading | no: a cost, not a wrong answer. Runs are now capped at 4,096 characters (split as an edit would split them); a test times the slowest of 200 edits at new places (27 us; 10 ms uncapped) |
 | A slowloris could lock readers out of the head buffers; evicting a connection lost its pending output; memory at 100K connections | the simulator | no |
 
 As in the first version: proofs held where aimed (no authorization,
@@ -108,6 +111,13 @@ version, found the two worst bugs in this one within minutes.
   1.5 MB (the 10x case). The cost: such a paragraph shows a break where
   the window starts or ends. Tested: a budget, and 60 random edits across
   the cuts leave the page, the view and the document equal.
+- **Reading a profile wrong.** Totals over ten keys were read as costs
+  per key (27 ms of WebAssembly "a key" was one 27 ms first edit). The
+  fix it pointed at was still right, but the claimed gain was not; timing
+  single edits showed it. Profiles are now compared per key.
+- **Visual mode still takes the whole text on a remote change or undo**
+  (`String(view.text)`, then split into blocks): O(n) at such moments,
+  not per local key.
 - **Real-time is polling** (0.4 s while others type, 1.5 s otherwise),
   not push: simple across worker processes; latency is visible.
 - **Left behind in the conversion from the first version**: comments,
@@ -151,8 +161,21 @@ request is the better comparison between the two native servers.
   first paint 1,032-1,376 ms, 2.4 s of main-thread script. Ours: first
   paint about 200 ms and 19 ms of script. Network time is not comparable
   (theirs crossed the internet, ours did not); the script and bytes are.
-- **Editor**: 15 ms a key at 1M and 3M characters, 11-18 ms in a 300 KB
-  paragraph; 17 MB of memory (JS heap and WebAssembly) at 1M characters.
+- **Editor**: 15 ms a key at 1M and 6M characters (a frame), 11-18 ms in
+  a 300 KB paragraph; 17 MB of memory (JS heap and WebAssembly) at 1M
+  characters. At 6M: typing 15-16 ms, Vim `x` 27 ms, typing in Visual
+  mode 25 ms (before the chunked text: 16-29, 30 and 33 ms).
+- **The editor's text is chunked** (`web/text.js`: 8 KB chunks and their
+  starts, a value like a string). As one JavaScript string, every edit to
+  a novel made a new 12 MB string, flattened by the next search or slice,
+  and garbage: about 6 ms a key at 6M. Now an edit copies the chunk it
+  touches and a table of about 730 starts: 16 us. Vim reads text through
+  string methods only (`charAt`, not `t[i]`), so it takes either.
+- **What a key costs now, at 6M (Vim `x`)**: the textarea's own layout of
+  its window when the text is set from script (`setRangeText`, about
+  9 ms) and measuring the caret's place (about 4 ms). Neither grows with
+  the document, only with the window (about 25-50 KB); typing, which the
+  browser inserts itself, does not pay the first.
 - **What made the difference, measured**: feed pages cached by a
   database generation (225 to 110 us); SQLite re-planning statements
   with a bound LIMIT on every request (fixed with the query planner

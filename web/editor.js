@@ -297,6 +297,7 @@ function start(ta) {
     set(next, a = null, b = a) {
       if (next === view.text || view.readOnly) return;
       const d = diff(view.text, next);
+      if (d.del === 0 && d.ins === "") return;
       change(d.p, d.del, d.ins, a, b);
     },
     edit(p, del, ins, a = null, b = a, typing = false) {
@@ -437,8 +438,8 @@ function start(ta) {
   // The view to the CRDT's text (loading, or after a large batch).
   function showDoc() {
     const next = doc.text();
-    if (next === view.text) return;
     const d = diff(view.text, next);
+    if (d.del === 0 && d.ins === "") return;
     history.remote(d.p, d.del, d.ins.length);
     view.reset(next);
     modes.remote(next);

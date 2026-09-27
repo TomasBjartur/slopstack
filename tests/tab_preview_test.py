@@ -55,7 +55,7 @@ def main():
         br = E.Browser(9491, f"{tmp}/c", a)
         br.js("localStorage.setItem('slop:vim', '0'); localStorage.setItem('slop:editor-mode', 'markdown')")
         br.open(f"{E.BASE}/edit/{pid}")
-        text = lambda: br.js(f"{ED}.view.text")
+        text = lambda: br.js(f"String({ED}.view.text)")
 
         # MARKDOWN MODE
         br.js("document.getElementById('editor').focus()")
@@ -91,7 +91,7 @@ def main():
         key(br, "Tab")
         check("Vim normal mode: Tab changes nothing", text() == before, repr(text()))
         br.js("document.querySelector('.vim-toggle').click()")
-        check("Tab edits reach the document (the CRDT)", br.js(f"{ED}.doc().text() === {ED}.view.text"))
+        check("Tab edits reach the document (the CRDT)", br.js(f"{ED}.doc().text() === String({ED}.view.text)"))
 
         # VISUAL MODE: nesting lists.
         E.http("POST", f"/edit/{pid}", a, {"title": "T", "body": "- a\n- b\n- c\n\nAfter."})

@@ -49,7 +49,7 @@ function lastOn(t, i) {
 function firstNonBlank(t, i) {
   let p = lineStart(t, i);
   const e = lineEnd(t, i);
-  while (p < e && (t[p] === " " || t[p] === "\t")) p++;
+  while (p < e && (t.charAt(p) === " " || t.charAt(p) === "\t")) p++;
   return p;
 }
 function col(t, i) {
@@ -85,7 +85,7 @@ function wordFwd(t, i, big) {
   if (c0 !== 0) while (p < n && cls(charAt(t, p), big) === c0) p = next(t, p);
   while (p < n && cls(charAt(t, p), big) === 0) {
     // An empty line is a word of its own.
-    if (t[p] === "\n" && t[p + 1] === "\n" && p + 1 > i) return p + 1;
+    if (t.charAt(p) === "\n" && t.charAt(p + 1) === "\n" && p + 1 > i) return p + 1;
     p = next(t, p);
   }
   return p;
@@ -93,7 +93,7 @@ function wordFwd(t, i, big) {
 function wordBack(t, i, big) {
   let p = prev(t, i);
   while (p > 0 && cls(charAt(t, p), big) === 0) {
-    if (t[p] === "\n" && t[p - 1] === "\n") return p;
+    if (t.charAt(p) === "\n" && t.charAt(p - 1) === "\n") return p;
     p = prev(t, p);
   }
   const c = cls(charAt(t, p), big);
@@ -137,20 +137,20 @@ function wordObject(t, i, big, around) {
   if (t.length === 0) return null;
   const c = cls(charAt(t, i), big);
   let s = i, e = next(t, i);
-  while (s > 0 && cls(charAt(t, prev(t, s)), big) === c && t[prev(t, s)] !== "\n") s = prev(t, s);
-  while (e < t.length && cls(charAt(t, e), big) === c && t[e] !== "\n") e = next(t, e);
+  while (s > 0 && cls(charAt(t, prev(t, s)), big) === c && t.charAt(prev(t, s)) !== "\n") s = prev(t, s);
+  while (e < t.length && cls(charAt(t, e), big) === c && t.charAt(e) !== "\n") e = next(t, e);
   if (around) {
     let e2 = e;
-    while (e2 < t.length && (t[e2] === " " || t[e2] === "\t")) e2++;
+    while (e2 < t.length && (t.charAt(e2) === " " || t.charAt(e2) === "\t")) e2++;
     if (e2 > e) e = e2;
-    else while (s > 0 && (t[s - 1] === " " || t[s - 1] === "\t")) s--;
+    else while (s > 0 && (t.charAt(s - 1) === " " || t.charAt(s - 1) === "\t")) s--;
   }
   return [s, e];
 }
 function quoteObject(t, i, q, around) {
   const s0 = lineStart(t, i), e0 = lineEnd(t, i);
   const qs = [];
-  for (let p = s0; p < e0; p++) if (t[p] === q && t[p - 1] !== "\\") qs.push(p);
+  for (let p = s0; p < e0; p++) if (t.charAt(p) === q && t.charAt(p - 1) !== "\\") qs.push(p);
   for (let k = 0; k + 1 < qs.length; k += 2) {
     if (i >= qs[k] && i <= qs[k + 1]) return around ? [qs[k], qs[k + 1] + 1] : [qs[k] + 1, qs[k + 1]];
   }
@@ -161,8 +161,8 @@ function quoteObject(t, i, q, around) {
 function bracketObject(t, i, open, close, around) {
   let depth = 0, s = -1;
   for (let p = i; p >= 0; p--) {
-    if (t[p] === close && p !== i) depth++;
-    else if (t[p] === open) {
+    if (t.charAt(p) === close && p !== i) depth++;
+    else if (t.charAt(p) === open) {
       if (depth === 0) {
         s = p;
         break;
@@ -173,8 +173,8 @@ function bracketObject(t, i, open, close, around) {
   if (s < 0) return null;
   depth = 0;
   for (let p = s + 1; p < t.length; p++) {
-    if (t[p] === open) depth++;
-    else if (t[p] === close) {
+    if (t.charAt(p) === open) depth++;
+    else if (t.charAt(p) === close) {
       if (depth === 0) return around ? [s, p + 1] : [s + 1, p];
       depth--;
     }
@@ -195,7 +195,15 @@ function textObject(t, i, kind, around) {
 // record nor the editor has to find it again by comparing whole texts
 // (megabytes, for a novel).
 function splice(t, a, b, x) {
-  return { u: t.slice(0, a) + x + t.slice(b), d: { p: a, del: t.slice(a, b), ins: x } };
+  return { u: edited(t, a, b, x), d: { p: a, del: t.slice(a, b), ins: x } };
+}
+
+// t with [a, b) replaced by x. The text is a string (tests) or the view's
+// chunked text (web/text.js: only the chunks the edit touches are new; a
+// novel as one string would be copied on every change). Both are read
+// through the same methods (charAt, not t[i]).
+function edited(t, a, b, x) {
+  return typeof t === "string" ? t.slice(0, a) + x + t.slice(b) : t.with(a, b, x);
 }
 
 // Vim.normalize(u, c) for u = t with the change d, reading only t and d.
@@ -245,7 +253,7 @@ export class Vim {
   // The cursor to show: normal mode stands on a character.
   static normalize(t, c) {
     c = clamp(c, 0, t.length);
-    if (c >= t.length || t[c] === "\n") {
+    if (c >= t.length || t.charAt(c) === "\n") {
       const s = lineStart(t, c);
       if (c > s) c = prev(t, c);
     }
@@ -449,9 +457,9 @@ export class Vim {
           const e = lineEnd(u, c);
           if (e >= u.length) break;
           let q = e + 1;
-          while (q < u.length && (u[q] === " " || u[q] === "\t")) q++;
-          const sep = q < u.length && u[q] !== "\n" && e > lineStart(u, c) && u[e - 1] !== " " ? " " : "";
-          u = u.slice(0, e) + sep + u.slice(q);
+          while (q < u.length && (u.charAt(q) === " " || u.charAt(q) === "\t")) q++;
+          const sep = q < u.length && u.charAt(q) !== "\n" && e > lineStart(u, c) && u.charAt(e - 1) !== " " ? " " : "";
+          u = edited(u, e, q, sep);
           c = e;
         }
         return u === t ? null : this.changed(t, u, c, keys, cur);
@@ -724,11 +732,11 @@ export class Vim {
     const body = text.repeat(n);
     if (line) {
       const at = before ? lineStart(t, cur) : lineEnd(t, cur) + (lineEnd(t, cur) < t.length ? 1 : 0);
-      const ins = at === t.length && !before && !t.endsWith("\n") && t !== "" ? "\n" + body.slice(0, -1) : body;
+      const ins = at === t.length && !before && !t.endsWith("\n") && t.length > 0 ? "\n" + body.slice(0, -1) : body;
       const { u, d } = splice(t, at, at, ins);
       return this.changed(t, u, firstNonBlank(u, at === t.length && ins.startsWith("\n") ? at + 1 : at), keys, cur, d);
     }
-    const at = before || cur >= t.length || t[cur] === "\n" ? cur : next(t, cur);
+    const at = before || cur >= t.length || t.charAt(cur) === "\n" ? cur : next(t, cur);
     const { u, d } = splice(t, at, at, body);
     return this.changed(t, u, prev(u, at + body.length), keys, cur, d);
   }
@@ -763,7 +771,7 @@ export class Vim {
       const p = locate(u, d.p, d.ins);
       if (p < 0) return { text: u, a: 0, b: 0, msg: "Cannot undo: the text there has changed", keepCursor: true };
       this.undos.pop();
-      u = u.slice(0, p) + d.del + u.slice(p + d.ins.length);
+      u = edited(u, p, p + d.ins.length, d.del);
       this.redos.push({ ...d, p });
       c = Math.min(d.cur, u.length);
       if (p + d.del.length < c || c < p) c = p;
@@ -782,7 +790,7 @@ export class Vim {
       const p = locate(u, d.p, d.del);
       if (p < 0) return { text: u, a: 0, b: 0, msg: "Cannot redo: the text there has changed", keepCursor: true };
       this.redos.pop();
-      u = u.slice(0, p) + d.ins + u.slice(p + d.del.length);
+      u = edited(u, p, p + d.del.length, d.ins);
       this.undos.push({ ...d, p });
       c = p;
       done++;
@@ -807,7 +815,7 @@ export class Vim {
     if (!r || r === "more") return null;
     if (this.mode === "insert") {
       const ins = insert || "";
-      const u = r.text.slice(0, r.a) + ins + r.text.slice(r.a);
+      const u = edited(r.text, r.a, r.a, ins);
       const d = diff(t, u);
       this.mode = "normal";
       this.insertFrom = null;

@@ -1,8 +1,16 @@
 // Tests web/vim.js: commands against what Vim does, then random key
 // sequences (invariants: the cursor stays in the text; undoing every
 // change gives back the starting text; redoing gives back the end).
-// usage: node tests/vim_test.mjs [seed]
+// With VIM_TEXT=1, the text is the editor's chunked text (web/text.js),
+// cut every few units so edits and searches cross chunk seams.
+// usage: [VIM_TEXT=1] node tests/vim_test.mjs [seed]
 import { Vim } from "../web/vim.js";
+import { Text } from "../web/text.js";
+
+const AS_TEXT = process.env.VIM_TEXT === "1";
+if (AS_TEXT) Text.CHUNK = 3;
+const mk = (s) => (AS_TEXT ? new Text(s) : s);
+const ed = (t, a, b, x) => (AS_TEXT ? t.with(a, b, x) : t.slice(0, a) + x + t.slice(b));
 
 let fails = 0;
 function check(name, ok, detail = "") {
@@ -40,10 +48,10 @@ function drive(vim, st, keys) {
         const r = vim.escape(st.text, st.a);
         st = { text: r.text, a: r.cur, b: r.cur };
       } else if (k === "Backspace") {
-        if (st.a > 0) st = { text: st.text.slice(0, st.a - 1) + st.text.slice(st.a), a: st.a - 1, b: st.a - 1 };
+        if (st.a > 0) st = { text: ed(st.text, st.a - 1, st.a, ""), a: st.a - 1, b: st.a - 1 };
       } else {
         const c = k === "Enter" ? "\n" : k;
-        st = { text: st.text.slice(0, st.a) + c + st.text.slice(st.b), a: st.a + c.length, b: st.a + c.length };
+        st = { text: ed(st.text, st.a, st.b, c), a: st.a + c.length, b: st.a + c.length };
       }
       continue;
     }
@@ -52,8 +60,8 @@ function drive(vim, st, keys) {
     // in place of the whole text).
     if (r && r.edit) {
       const { p, del, ins } = r.edit;
-      const got = st.text.slice(0, p) + ins + st.text.slice(p + del);
-      if (got !== r.text) {
+      const got = String(ed(st.text, p, p + del, ins));
+      if (got !== String(r.text)) {
         editFails++;
         if (editFails <= 3) console.log("EDIT MISMATCH", JSON.stringify({ k, text: st.text.slice(0, 80), edit: r.edit }));
       }
@@ -68,7 +76,7 @@ function drive(vim, st, keys) {
 // with "|" at the cursor.
 function vim(start, keys, v = new Vim()) {
   const a = start.indexOf("|");
-  const st = drive(v, { text: start.replace("|", ""), a, b: a }, tokens(keys));
+  const st = drive(v, { text: mk(start.replace("|", "")), a, b: a }, tokens(keys));
   return st.text.slice(0, st.a) + "|" + st.text.slice(st.a);
 }
 
@@ -185,8 +193,8 @@ for (const [start, keys, want] of cases) {
 // :w asks to save.
 {
   const v = new Vim();
-  const st = drive(v, { text: "abc", a: 0, b: 0 }, tokens(":w<CR>"));
-  check(":w saves", st.save === true && st.text === "abc");
+  const st = drive(v, { text: mk("abc"), a: 0, b: 0 }, tokens(":w<CR>"));
+  check(":w saves", st.save === true && String(st.text) === "abc");
 }
 
 // Random sequences.
@@ -206,7 +214,7 @@ for (let round = 0; round < Number(process.env.ROUNDS ?? 3000) && bad < 5; round
   let text = "";
   for (let j = rnd(12); j > 0; j--) text += WORDS[rnd(WORDS.length)] + (rnd(3) ? " " : "");
   const start = text;
-  let st = { text, a: 0, b: 0 };
+  let st = { text: mk(text), a: 0, b: 0 };
   const seq = [];
   let ok = true;
   for (let j = 0; j < 40 && ok; j++) {
@@ -226,16 +234,16 @@ for (let round = 0; round < Number(process.env.ROUNDS ?? 3000) && bad < 5; round
   if (ok) {
     // Undo everything: back to the start (from insert mode, Esc first).
     st = drive(v, st, ["Escape", "Escape"]);
-    const end = st.text;
+    const end = String(st.text);
     const n = v.undos.length;
     st = drive(v, st, Array(n + 1).fill("u"));
-    if (st.text !== start) {
+    if (String(st.text) !== start) {
       ok = false;
       console.log("undo all", JSON.stringify(start), "->", JSON.stringify(st.text), seq.join(""));
     } else {
       // Exactly the changes undone (any undone before stay undone).
       st = drive(v, st, Array(n).fill("C-r"));
-      if (st.text !== end) {
+      if (String(st.text) !== end) {
         ok = false;
         console.log("redo all", JSON.stringify(end), "->", JSON.stringify(st.text), seq.join(""));
       }

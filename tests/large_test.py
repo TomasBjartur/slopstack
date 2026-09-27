@@ -96,7 +96,7 @@ def server_text(db, pid):
 
 class Page(E.Browser):
     def full(self):
-        t = self.js(f"{B}.view.text")
+        t = self.js(f"String({B}.view.text)")
         return None if t is None else u16(t)
 
     def sel(self):
@@ -375,7 +375,7 @@ def main():
             time.sleep(0.5)
             got = br.full()
             check("…each key a small change in the Markdown, exactly there", got == text[:at + 1] + "uick brown fox" + text[at + 1:], (got[at - 5: at + 30] if got else None))
-            check("…and in the document (the CRDT)", br.js(f"{B}.doc().text() === {B}.view.text"))
+            check("…and in the document (the CRDT)", br.js(f"{B}.doc().text() === String({B}.view.text)"))
             text = got
         br.js("document.querySelector('.edit-tools .seg:nth-child(1)').click()")
         time.sleep(0.3)

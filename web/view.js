@@ -30,6 +30,8 @@
 // next to the window are never skipped (so their heights are real).
 //
 // Positions are UTF-16 units in the whole text, as the CRDT counts them.
+// The whole text is a chunked Text (text.js), not one string: an edit to
+// a novel makes a few KB new, not 12 MB.
 
 const SEG = 8192;       // static pieces are cut at line ends near this size
 // The window reaches this far past the selection. The browser lays a
@@ -49,7 +51,7 @@ export class View {
   constructor(ta, hooks) {
     this.ta = ta;
     this.hooks = hooks;
-    this.text = ta.value;
+    this.text = new Text(ta.value);
     this.box = document.createElement("div");
     this.box.className = "doc";
     ta.parentNode.insertBefore(this.box, ta);
@@ -406,7 +408,7 @@ export class View {
     const d = diff(old, v);
     const p = w.s + d.p;
     const delText = old.slice(d.p, d.p + d.del);
-    this.text = this.text.slice(0, p) + d.ins + this.text.slice(p + d.del);
+    this.text = this.text.with(p, p + d.del, d.ins);
     this.pieces[w.i].len = v.length;
     this.winText = v;
     this.grow();
@@ -427,7 +429,7 @@ export class View {
     const map = (x) => (x <= p ? x : x >= p + del ? x - del + ins.length : p + ins.length);
     const delta = ins.length - del;
     const sp = this.span(p, p + del); // (before the text changes)
-    this.text = this.text.slice(0, p) + ins + this.text.slice(p + del);
+    this.text = this.text.with(p, p + del, ins);
     if (p >= w.s && p + del <= w.e) {
       // Inside the window.
       const ta = this.ta;
@@ -458,12 +460,14 @@ export class View {
 
   // Replaces the whole text (the document arrived): the selection stays
   // with the text around it.
+  // (t: a string or a Text.)
   reset(t) {
     if (t === this.text) return;
     const d = diff(this.text, t);
+    if (d.del === 0 && d.ins === "") return;
     const s = this.sel();
     const map = (x) => (x <= d.p ? x : x >= d.p + d.del ? x - d.del + d.ins.length : d.p + d.ins.length);
-    this.text = t;
+    this.text = this.text.with(d.p, d.p + d.del, d.ins);
     const a = map(s.back ? s.b : s.a), b = map(s.back ? s.a : s.b);
     this.build(a, b);
     const w = this.win();
@@ -579,6 +583,7 @@ function guess(len) {
 // The edit between two strings: common prefix and suffix, compared 4 KB at
 // a time (common.js), not splitting a surrogate pair.
 import { prefix, suffix } from "./common.js";
+import { Text } from "./text.js";
 
 export function diff(a, b) {
   let p = prefix(a, b);

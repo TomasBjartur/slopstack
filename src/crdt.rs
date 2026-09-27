@@ -31,6 +31,12 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 /// Run indexes per block (a block is split past this).
 const BLOCK_MAX: usize = 64;
+/// Characters in a run at most. Finding a character's byte in a run with
+/// non-ASCII text reads the run from its start: a novel pasted as one run
+/// made every edit read megabytes (4.5 ms a key at 6M characters, in the
+/// browser). Longer runs are split as an edit inside one would split them;
+/// the elements and the tree are the same.
+pub const RUN_MAX: u32 = 4096;
 /// The root's key (rep 0 is never an element).
 pub const ROOT: u64 = 0;
 /// Replica 1 is the server's own (saves from the form without JavaScript);
@@ -264,6 +270,11 @@ impl Doc {
     }
 
     /// Runs (for tests and limits).
+    /// The longest run's length in characters (tests).
+    pub fn longest_run(&self) -> u32 {
+        self.len.iter().copied().max().unwrap_or(0)
+    }
+
     pub fn runs(&self) -> usize {
         self.rep.len()
     }
@@ -654,6 +665,7 @@ impl Doc {
         if let Place::After(r) = place {
             let ru = r as usize;
             if side == RIGHT
+                && self.len[ru] + n <= RUN_MAX
                 && self.last(r) == parent
                 && self.rep[ru] == rep
                 && self.ctr[ru] + self.len[ru] == ctr
@@ -694,6 +706,14 @@ impl Doc {
         let i = sibs.partition_point(|&s| key(reps[s as usize], ctrs[s as usize]) < tk);
         sibs.insert(i, t);
         sink.change(self.pos_of(t), 0, text);
+        self.cap(t);
+    }
+
+    /// Splits run r (and its tails) into runs of at most RUN_MAX.
+    fn cap(&mut self, mut r: u32) {
+        while self.len[r as usize] > RUN_MAX {
+            r = self.split(r, RUN_MAX);
+        }
     }
 
     fn delete(&mut self, rep: u32, ctr: u32, len: u32, sink: &mut dyn Sink) -> bool {
@@ -907,6 +927,10 @@ impl Doc {
         // is refused (else two replicas could disagree).
         if !d.order_ok() {
             return Err(f);
+        }
+        // (Saved before runs were capped: split now.)
+        for r in 0..d.rep.len() as u32 {
+            d.cap(r);
         }
         Ok(d)
     }
