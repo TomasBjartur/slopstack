@@ -151,36 +151,42 @@ impl FeedCache {
     }
 }
 
-/// Rendered posts by id, as of their updated_ms. Bounded by bytes: past
+/// Rendered posts by id, as of a version (a published post's updated_ms;
+/// a draft's document seq), with their word count. Bounded by bytes: past
 /// the budget, entries are dropped until it fits.
 struct PostCache {
-    map: HashMap<u64, (i64, Rc<Markup>)>,
+    map: HashMap<u64, (i64, Rc<Markup>, i64)>,
     bytes: usize,
+    budget: usize,
 }
 
 impl PostCache {
-    fn get(&self, id: u64, updated_ms: i64) -> Option<Rc<Markup>> {
+    fn new(budget: usize) -> PostCache {
+        PostCache { map: HashMap::new(), bytes: 0, budget }
+    }
+
+    fn get(&self, id: u64, version: i64) -> Option<(Rc<Markup>, i64)> {
         match self.map.get(&id) {
-            Some((u, m)) if *u == updated_ms => Some(m.clone()),
+            Some((v, m, w)) if *v == version => Some((m.clone(), *w)),
             _ => None,
         }
     }
 
-    fn put(&mut self, id: u64, updated_ms: i64, m: Rc<Markup>) {
+    fn put(&mut self, id: u64, version: i64, m: Rc<Markup>, words: i64) {
         let n = m.len();
-        if n > CACHE_BYTES / 4 {
+        if n > self.budget / 4 {
             return;
         }
-        if let Some((_, old)) = self.map.remove(&id) {
+        if let Some((_, old, _)) = self.map.remove(&id) {
             self.bytes -= old.len();
         }
-        while self.bytes + n > CACHE_BYTES {
+        while self.bytes + n > self.budget {
             let k = *self.map.keys().next().expect("bytes > 0 means entries");
-            let (_, old) = self.map.remove(&k).expect("key just seen");
+            let (_, old, _) = self.map.remove(&k).expect("key just seen");
             self.bytes -= old.len();
         }
         self.bytes += n;
-        self.map.insert(id, (updated_ms, m));
+        self.map.insert(id, (version, m, words));
     }
 }
 
@@ -195,6 +201,8 @@ pub struct Site {
     comments_md: HashMap<u64, Rc<Markup>>,
     conf: Conf,
     cache: PostCache,
+    /// Drafts and previews (the editor's current text), by document seq.
+    drafts: PostCache,
     /// Editor page loads this minute, by user (OPENS_PER_MINUTE).
     opens: HashMap<u64, (u64, u32)>,
     /// Login challenges made this minute (CHALLENGES_PER_MINUTE).
@@ -266,7 +274,7 @@ type Res = Result<(), u16>;
 
 impl Site {
     pub fn new(st: Store, conf: Conf, changes: Changes) -> Site {
-        Site { st, docs: crate::docs::Docs::new(), feeds: FeedCache { map: HashMap::new(), bytes: 0 }, stmt_stats: std::env::var("BLOG_STMT_STATS").as_deref() == Ok("1"), requests: 0, comments_md: HashMap::new(), conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, opens: HashMap::new(), minute: 0, challenges: 0, swept_ms: 0, changes, waits: Vec::new() }
+        Site { st, docs: crate::docs::Docs::new(), feeds: FeedCache { map: HashMap::new(), bytes: 0 }, stmt_stats: std::env::var("BLOG_STMT_STATS").as_deref() == Ok("1"), requests: 0, comments_md: HashMap::new(), conf, cache: PostCache::new(CACHE_BYTES), drafts: PostCache::new(CACHE_BYTES / 4), opens: HashMap::new(), minute: 0, challenges: 0, swept_ms: 0, changes, waits: Vec::new() }
     }
 
     // RESPONSES
@@ -564,17 +572,14 @@ impl Site {
         let p = self.permit(r, bid, m.id, Action::ReadPost { post: m.id }).map_err(|_| 404u16)?;
         let can_edit = p.facts().role.is_some();
         let body = match self.cache.get(m.id, m.updated_ms) {
-            // A draft (only its authors see it): as it is now, not cached.
-            _ if !m.published => {
-                let doc = self.docs.get(&mut self.st, m.id).map_err(no_code)?;
-                Rc::new(crate::markdown::render(doc.text().as_bytes()))
-            }
-            Some(b) => b,
+            // A draft (only its authors see it): as it is now.
+            _ if !m.published => self.draft(m.id)?.0,
+            Some((b, _)) => b,
             None => {
                 let mut md = Vec::new();
                 self.st.q(Q::PostBody, &[Val::Int(m.id as i64)], |row| md = row.bytes(0).to_vec()).map_err(db_code)?;
                 let b = Rc::new(crate::markdown::render(&md));
-                self.cache.put(m.id, m.updated_ms, b.clone());
+                self.cache.put(m.id, m.updated_ms, b.clone(), 0);
                 b
             }
         };
@@ -985,8 +990,11 @@ impl Site {
         // for other posts anyway; see the schema.)
         for id in ids {
             self.docs.forget(id);
-            if let Some((_, m)) = self.cache.map.remove(&id) {
+            if let Some((_, m, _)) = self.cache.map.remove(&id) {
                 self.cache.bytes -= m.len();
+            }
+            if let Some((_, m, _)) = self.drafts.map.remove(&id) {
+                self.drafts.bytes -= m.len();
             }
         }
         resp::redirect(out, "/dash", b"");
@@ -1145,8 +1153,7 @@ impl Site {
         let (saved_title, blog_slug, blog_title, author, handle, published_ms) = info.ok_or(404u16)?;
         // The title as the editor has it now (not saved yet), if it sent one.
         let title = Form::parse(r.query.as_bytes()).and_then(|q| q.text("title", 200, false)).unwrap_or(saved_title);
-        let md = self.docs.get(&mut self.st, id).map_err(no_code)?.text();
-        let body = crate::markdown::render(md.as_bytes());
+        let (body, words) = self.draft(id)?;
         let v = pages::PostView {
             id,
             blog_slug: &blog_slug,
@@ -1155,7 +1162,7 @@ impl Site {
             author: &author,
             handle: &handle,
             published_ms: if published_ms > 0 { published_ms } else { r.now() as i64 },
-            words: crate::markdown::words(md.as_bytes()) as i64,
+            words,
             published: false,
             can_edit: true,
             just_published: false,
@@ -1164,6 +1171,23 @@ impl Site {
         let s = r.signed_in();
         self.html(r, out, 200, |h| pages::post(h, s, &v, &body, None));
         Ok(())
+    }
+
+    /// The editor's current text rendered, and its words: once per version
+    /// of the document (a novel takes 70-80 ms to render; a draft's page
+    /// and its preview were rendered again on every view).
+    fn draft(&mut self, id: u64) -> Result<(Rc<Markup>, i64), u16> {
+        // (Brought up to date with the database first: its seq is the version.)
+        self.docs.get(&mut self.st, id).map_err(no_code)?;
+        let seq = self.docs.seq(id);
+        if let Some(hit) = self.drafts.get(id, seq) {
+            return Ok(hit);
+        }
+        let md = self.docs.get(&mut self.st, id).map_err(no_code)?.text();
+        let body = Rc::new(crate::markdown::render(md.as_bytes()));
+        let words = crate::markdown::words(md.as_bytes()) as i64;
+        self.drafts.put(id, seq, body.clone(), words);
+        Ok((body, words))
     }
 
     fn save(&mut self, r: &mut R, id: &str, f: &Form, out: &mut Vec<u8>) -> Res {
@@ -1263,7 +1287,8 @@ impl Site {
         let mut slug = String::new();
         self.st.q(Q::BlogSlug, &[Val::Int(blog as i64)], |row| slug = row.text(0).into()).map_err(db_code)?;
         self.st.write(&p, r.now(), true, |st, _| Ok(st.run(Q::PostDel, &[Val::Int(id as i64)])?)).map_err(no_code)?;
-        self.cache.map.remove(&id).map(|(_, m)| self.cache.bytes -= m.len());
+        self.cache.map.remove(&id).map(|(_, m, _)| self.cache.bytes -= m.len());
+        self.drafts.map.remove(&id).map(|(_, m, _)| self.drafts.bytes -= m.len());
         self.docs.forget(id);
         resp::redirect(out, &format!("/dash/{slug}"), b"");
         Ok(())

@@ -145,6 +145,19 @@ def run(db):
     check("…and reaches the co-author", st == 200 and ins(ra, 6, ra, 5, 1, "!") in r["ops"], (st, r))
     seq3 = r["seq"]
 
+    # The draft page and the preview are rendered once per version of the
+    # document (cached by its seq): an edit shows at once.
+    slug = db.execute("SELECT slug FROM post WHERE id = ?", (post,)).fetchone()[0]
+    views = lambda: (http("GET", f"/b/ann/{slug}", a)[1], http("GET", f"/edit/{post}/preview", a)[1])
+    before = views()
+    st, r = sync(a, post, seq3, ra, ins(ra, 100, ra, 6, 1, " fresh"))
+    after = views()
+    check("the draft page and the preview show an edit made after they were cached",
+          all(b"fresh" not in v for v in before) and all(b"hello! fresh world" in v for v in after), [v[-400:] for v in after])
+    st, r = sync(a, post, r["seq"], ra, dele(ra, 100, 6))
+    check("…and when it is undone", all(b"fresh" not in v and b"hello! world" in v for v in views()))
+    seq3 = r["seq"]
+
     # Removed from the blog: syncing stops.
     http("POST", f"/dash/ann/authors/{b_id}/remove", a)
     st, _ = sync(b, post, seq3, rb, ins(rb, 50, 0, 0, 1, "late"))

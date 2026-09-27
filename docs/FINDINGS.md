@@ -116,6 +116,21 @@ version, found the two worst bugs in this one within minutes.
   1.5 MB (the 10x case). The cost: such a paragraph shows a break where
   the window starts or ends. Tested: a budget, and 60 random edits across
   the cuts leave the page, the view and the document equal.
+- **Rendering a novel stays on the event loop (decided, measured).** A
+  6 MB post holds its worker 67-84 ms while it renders (a small page on
+  the same worker waited that long), once per version. Moving it to a
+  helper thread would cost a way to handle a request again later and a
+  thread pool; not worth one sub-100 ms pause per update. What was worth
+  it: a draft's page and its Preview rendered the novel again on every
+  view (130-165 ms each); they are now cached by the document's seq
+  (39-42 ms, mostly sending 6 MB; tested that an edit shows at once,
+  mutation-checked).
+- **Allocations on the request path: left as they are (measured).** Under
+  load (one worker, 16 connections), `perf` puts allocation and copying
+  (malloc, free, realloc, memcpy) at 0.5% of the server's time on the
+  home page, 0.8% on a post page and 1.8% on a post with 20 comments; the
+  kernel's networking and SQLite take most of the rest. Removing them
+  would gain at most about 2%.
 - **Reading a profile wrong.** Totals over ten keys were read as costs
   per key (27 ms of WebAssembly "a key" was one 27 ms first edit). The
   fix it pointed at was still right, but the claimed gain was not; timing

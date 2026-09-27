@@ -78,10 +78,15 @@ none is planned.
   events: an ordinary request and answer, through any proxy, with no
   second protocol in the loop.
 - **Work on the loop**: every request's work runs on its worker's loop,
-  bounded by the limits and a query deadline; rendering a novel (about
-  200 ms, then cached) is the longest. (Planned and not built: helper
-  threads for data-sized work. Other workers keep serving meanwhile; if
-  one worker's pauses matter, this is the next step.)
+  bounded by the limits and a query deadline. The longest is rendering a
+  novel: measured, a 6 MB post holds its worker for 67-84 ms, once per
+  version (published pages are cached by update time, drafts and
+  previews by the document's seq); new connections go to the other
+  workers meanwhile. Helper threads were planned for this and not built:
+  they would need a request handled again once its work is done, and a
+  thread pool, to save one pause of under 100 ms per update of a novel.
+  If such pauses come to matter (many novels, many updates), the parked
+  requests of the event loop are the place to start.
 - **All I/O behind a trait** (`Io`: accept, read, write, close, timers,
   clock, randomness, the database). Production implements it with
   syscalls; the **simulator** implements it with a seeded model of the
