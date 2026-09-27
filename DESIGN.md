@@ -75,9 +75,12 @@ none is planned.
 - **Memory**: fixed pools allocated at start from named limits
   (connections, buffers, rows). Past a limit the answer is a clear refusal
   (503, 413, 429), never an allocation.
-- **Pages**: templates compile to render plans; stored post HTML is spliced
-  in as bytes; a page cache keyed by (page, generation) serves repeat
-  reads with no work.
+- **Pages** are written straight into the response buffer by template
+  functions (no render plans: those were for the first version's slow
+  strings). A post's published Markdown is rendered when read (hundreds of
+  MB a second: a typical post in well under a millisecond, a novel in tens
+  of milliseconds); a page cache keyed by (page, generation) serves repeat
+  reads with no work. No rendered HTML is stored: one source of truth.
 
 ## Feeling like an SPA
 
@@ -102,9 +105,9 @@ behaves like an app:
 
 ## Documents (novel-length from the start)
 
-- **A post is a sequence of blocks** (Markdown paragraphs, headings, list
-  items, fences), each rendered and stored separately; saving re-renders
-  only changed blocks; a page is the blocks' bytes in order.
+- **A post's published text** is its Markdown, stored when it is published
+  or updated; reading pages render it (and cache the page). The working
+  text is the CRDT's.
 - **The CRDT is Fugue** (as before), stored and sent in **runs**: text
   typed or pasted in one go by one writer is one record (id range, parent,
   side, UTF-8 text); deletions are id ranges. A pasted novel is one run,
@@ -114,7 +117,8 @@ behaves like an app:
   tombstone ranges) and the operations since; a client loads the snapshot
   and the tail. The limit is on the state's size, not on how many edits a
   post has ever had.
-- **The browser holds the text in blocks too** (not one string): the view
+- **The browser holds the text in blocks** (not one string, for the
+  browser's layout cost, not ours): the view
   (a textarea window over the text, static text elsewhere; as in the first
   version, which works) may cut inside a paragraph, so a 1.5 MB paragraph
   types as fast as short ones.

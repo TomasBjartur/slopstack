@@ -6,8 +6,8 @@
 //
 // Documents are stored for novel length: a post's collaborative text is
 // batches of CRDT operations (binary runs, src/doc/) and a snapshot of the
-// merged state; its rendered HTML is stored per block, so a save
-// re-renders only blocks that changed and a page is the blocks' bytes.
+// merged state. Its published text is Markdown (post.body_md), rendered
+// when read (no HTML is stored: one source of truth).
 use crate::sys::sqlite::{Db, DbErr, Row, Val};
 
 pub const MIGRATIONS: &[&str] = &[
@@ -81,19 +81,12 @@ pub const MIGRATIONS: &[&str] = &[
        published_ms INTEGER,
        updated_ms INTEGER NOT NULL,
        words INTEGER NOT NULL DEFAULT 0,
+       -- The published text (Markdown), as of the last publish or update.
+       body_md TEXT NOT NULL DEFAULT '',
        UNIQUE (blog_id, slug)
      ) STRICT;
      CREATE INDEX post_blog ON post(blog_id, published, published_ms);
      CREATE INDEX post_author ON post(author_id, published, published_ms);
-     -- The rendered post: its blocks' HTML in order (allowed markup only:
-     -- src/markdown.rs, spec/markup.rs), keyed by the block's hash.
-     CREATE TABLE post_block (
-       post_id INTEGER NOT NULL REFERENCES post(id) ON DELETE CASCADE,
-       n INTEGER NOT NULL,
-       hash BLOB NOT NULL,
-       html BLOB NOT NULL,
-       PRIMARY KEY (post_id, n)
-     ) STRICT, WITHOUT ROWID;
      -- The collaborative text: batches of operations, and a snapshot.
      CREATE TABLE doc_ops (
        seq INTEGER PRIMARY KEY AUTOINCREMENT,

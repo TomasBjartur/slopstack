@@ -9,6 +9,9 @@ pub mod http;
 #[path = "../spec/authz.rs"]
 pub mod spec_authz;
 pub mod authz;
+#[path = "../spec/markup.rs"]
+pub mod spec_markup;
+pub mod html;
 pub mod sys {
     pub mod linux;
     pub mod sqlite;
