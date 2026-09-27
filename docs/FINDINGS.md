@@ -116,4 +116,41 @@ version, found the two worst bugs in this one within minutes.
 
 ## Performance
 
-(Measured after the test runs; see below.)
+`tests/bench.py` (raw numbers in `docs/bench.json`): the same data served by
+this version, the first version (Bend + C) and its Next.js/React
+baseline; one worker each on one core, the load generator on the other;
+browser metrics in headless Chrome at 4x CPU throttling (a phone),
+medians of 5. After the feed cache and the query-plan fix:
+
+| Page | This version | First version | Next.js |
+|---|---|---|---|
+| Home: requests/s, CPU per request | 8,456, 110 us | 8,608, 140 us | 118 |
+| Blog page | 8,352, 105 us | 8,544, 135 us | 148 |
+| Post page (no comments) | 8,292 | 8,185 | 238 |
+| Post page, 20 comments | 5,237 | not measured | not measured |
+| Author page | 8,557, 110 us | 8,250, 140 us | 153 |
+| HTML, home (gzipped) | 6.5 KB (1.1) | 16.8 KB (3.3) | 47.4 KB (5.7) |
+| JavaScript on reading pages (gzipped) | 35.8 KB (14.3) | 35.8 KB (14.3) | 583 KB (171) |
+| First paint, home (phone speed) | 208 ms | 224 ms | 252 ms |
+| Main-thread script, home | 19 ms | 33 ms | 117 ms |
+
+Requests a second are bound by connection handling at this rate (each
+request is a new TCP connection in the load generator); the CPU per
+request is the better comparison between the two native servers.
+
+- **A 6 MB novel**: its page is rendered once (about 200 ms) and then
+  served from memory: 247 requests a second of 7.4 MB each; first paint
+  248 ms at phone speed. The first version could not hold a post this
+  long (1 MiB cap).
+- **Substack** (a real page, over the internet, same throttling):
+  116 KB of HTML, 6.4 MB of JavaScript (2 MB gzipped) in 157 files,
+  first paint 1,032-1,376 ms, 2.4 s of main-thread script. Ours: first
+  paint about 200 ms and 19 ms of script. Network time is not comparable
+  (theirs crossed the internet, ours did not); the script and bytes are.
+- **Editor**: 15 ms a key at 1M and 3M characters, 11-18 ms in a 300 KB
+  paragraph; 17 MB of memory (JS heap and WebAssembly) at 1M characters.
+- **What made the difference, measured**: feed pages cached by a
+  database generation (225 to 110 us); SQLite re-planning statements
+  with a bound LIMIT on every request (fixed with the query planner
+  stability guarantee: 3,450 to 5,237 requests a second on a comment
+  page).
