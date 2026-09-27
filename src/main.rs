@@ -13,6 +13,8 @@ pub mod authz;
 pub mod spec_markup;
 pub mod html;
 pub mod markdown;
+pub mod md_tables;
+pub mod json;
 pub mod sys {
     pub mod linux;
     pub mod sqlite;
@@ -46,6 +48,27 @@ fn run() {
             "db" => tests::db::run(),
             "http" => tests::http::run(),
             "markdown" => tests::markdown::run(),
+            "mdrefs" => {
+                for n in [30_000, 100_000, 300_000] {
+                    let md: String = (0..n).map(|i| format!("[r{i}]: /u{i}\n")).collect::<String>() + "[r1] [r29999]";
+                    let t = std::time::Instant::now();
+                    markdown::render(md.as_bytes());
+                    eprintln!("{n} refs: {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+                    let md2 = md.repeat(3);
+                    let t = std::time::Instant::now();
+                    markdown::render(md2.as_bytes());
+                    eprintln!("{n} refs x3 (then text): {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            "mdbench" => {
+                let para = "The river of long evenings carries *small boats* past old walls where people talk about **books** and [maps](https://example.com). ".repeat(8) + "\n\n";
+                let six = para.repeat(6_000_000 / para.len());
+                for _ in 0..5 {
+                    let t = std::time::Instant::now();
+                    let n = markdown::render(six.as_bytes()).len();
+                    eprintln!("{n} bytes in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
             "sim" => tests::sim::run(),
             t => panic!("no test {t}"),
         }

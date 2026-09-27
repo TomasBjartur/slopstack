@@ -424,13 +424,60 @@ impl Markup {
         }
     }
 
-    /// Text, escaped.
+    /// Text, escaped (< > " & as entities), written straight into the
+    /// bytes: one piece, whose bytes are those written.
     pub fn text(&mut self, s: &[u8])
         requires old(self).wf(),
         ensures final(self).wf(),
     {
-        let e = escape(s);
-        self.put(Ghost(Piece::Text(e@)), e.as_slice());
+        let ghost old_ps = self.pieces@;
+        let ghost start = self.bytes@;
+        let mut i: usize = 0;
+        self.bytes.reserve(s.len());
+        while i < s.len()
+            invariant
+                self.pieces@ == old_ps,
+                start == flatten(old_ps),
+                forall|k: int| 0 <= k < old_ps.len() ==> piece_ok(#[trigger] old_ps[k]),
+                self.bytes@.len() >= start.len(),
+                self.bytes@.subrange(0, start.len() as int) == start,
+                text_ok(self.bytes@.subrange(start.len() as int, self.bytes@.len() as int)),
+            decreases s.len() - i,
+        {
+            let c = s[i];
+            let ghost before = self.bytes@;
+            if c == 60 {
+                append(&mut self.bytes, &[38, 108, 116, 59]);
+            } else if c == 62 {
+                append(&mut self.bytes, &[38, 103, 116, 59]);
+            } else if c == 34 {
+                append(&mut self.bytes, &[38, 113, 117, 111, 116, 59]);
+            } else if c == 38 {
+                append(&mut self.bytes, &[38, 97, 109, 112, 59]);
+            } else {
+                self.bytes.push(c);
+            }
+            proof {
+                let now = self.bytes@;
+                assert(now.subrange(0, start.len() as int) =~= before.subrange(0, start.len() as int));
+                let e = now.subrange(start.len() as int, now.len() as int);
+                let eb = before.subrange(start.len() as int, before.len() as int);
+                assert forall|k: int| 0 <= k < e.len() implies #[trigger] e[k] != 60 && e[k] != 62 && e[k] != 34 by {
+                    if k < eb.len() { assert(e[k] == eb[k]); }
+                }
+            }
+            i += 1;
+        }
+        proof {
+            let e = self.bytes@.subrange(start.len() as int, self.bytes@.len() as int);
+            assert(self.bytes@ =~= start + e);
+            lemma_flatten_push(old_ps, Piece::Text(e));
+            let ps = old_ps.push(Piece::Text(e));
+            assert forall|k: int| 0 <= k < ps.len() implies piece_ok(#[trigger] ps[k]) by {
+                if k < old_ps.len() { assert(ps[k] == old_ps[k]); }
+            }
+            self.pieces = Ghost(ps);
+        }
     }
 
     /// <a href="url" title="title"> if url is allowed (true); else nothing.

@@ -32,3 +32,15 @@ checksum, why, and what we use. Nothing else is vendored or fetched.
   signals) without a framework: DESIGN.md, "Feeling like an SPA".
 - Served with a per-response CSP nonce; data-* expressions hold only
   server-written ids and slugs.
+
+## whatwg/entities.json (data, not code)
+- https://html.spec.whatwg.org/entities.json (2026-09-27)
+- sha256 = d741d877ac77c4194c4ad526b5b4a19aef8dfe411ab840a466891cdbb9f362e6
+- Why: HTML5's named character references, which CommonMark decodes
+  (&copy; and the rest). tools/gen_md_tables.py turns it into
+  src/md_tables.rs (checked against this hash).
+
+## tests/commonmark/spec.json (test data)
+- https://spec.commonmark.org/0.31.2/spec.json
+- sha256 = d431b29d97b6f73e69d547109cf5081578fac931e72afe95639ebe766c1b2a20
+- Why: the 652 examples of the CommonMark spec, which test src/markdown.rs.
