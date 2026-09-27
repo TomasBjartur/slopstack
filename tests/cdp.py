@@ -88,4 +88,11 @@ def start_chrome(port, profile):
 
 def page_ws(port):
     targets = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list"))
-    return WS(next(t for t in targets if t["type"] == "page")["webSocketDebuggerUrl"])
+    ws = WS(next(t for t in targets if t["type"] == "page")["webSocketDebuggerUrl"])
+    # The editor opens in Visual mode unless told otherwise; most tests type
+    # into the Markdown text, so they start there (a test that switches
+    # keeps its choice; tests/visual_test.py removes this to check the
+    # default). ws.pin: the script's id.
+    ws.pin = ws.call("Page.addScriptToEvaluateOnNewDocument", {"source":
+        "try { if (!localStorage.getItem('slop:editor-mode')) localStorage.setItem('slop:editor-mode', 'markdown'); } catch (e) {}"})["identifier"]
+    return ws

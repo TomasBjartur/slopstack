@@ -72,6 +72,16 @@ def check(name, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"   {detail}"))
 
 def run():
+    # With no choice made, the editor opens in Visual mode, and an empty
+    # post says where to start.
+    br.ws.call("Page.removeScriptToEvaluateOnNewDocument", {"identifier": br.ws.pin})
+    br.open(f"{E.BASE}/edit/{PID}")
+    br.js("localStorage.removeItem('slop:editor-mode')")
+    br.open(f"{E.BASE}/edit/{PID}")
+    time.sleep(0.5)
+    check("with no choice made: Visual mode", br.js("!document.querySelector('.wys').hidden") is True)
+    check("…an empty post shows 'Tell your story…'", br.js("getComputedStyle(document.querySelector('.wys p'), '::before').content") == '"Tell your story…"',
+          br.js("getComputedStyle(document.querySelector('.wys p'), '::before').content"))
     # Visual mode chosen last time: after a reload it opens with the text
     # rendered and editable (it once opened before the renderer loaded).
     load("Hello world here.")

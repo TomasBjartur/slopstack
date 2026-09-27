@@ -537,7 +537,8 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
 
   // Where we were last time.
   if (pref(PREF_VIM) === "1" && pref(PREF_VIM_OK) === "1") vimSet(true);
-  if (pref(PREF_MODE) === "visual") toMode("visual", false);
+  // Visual mode unless the writer chose Markdown (the choice is kept).
+  if (pref(PREF_MODE) !== "markdown") toMode("visual", false);
 
   return {
     // The text changed elsewhere (another writer, a sync, undo).

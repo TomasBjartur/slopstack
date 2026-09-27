@@ -125,7 +125,7 @@ def main():
         st, _, _ = E.http("GET", f"/edit/{pid}/preview", c)
         check("preview: an outsider gets 404", st == 404, st)
         st, loc, _ = E.http("GET", f"/edit/{pid}/preview")
-        check("preview: signed out, off to log in", st == 303 and loc == "/login", (st, loc))
+        check("preview: signed out, off to log in (and back)", st == 303 and loc == f"/login?next=%2Fedit%2F{pid}%2Fpreview", (st, loc))
         st, _, body = E.http("GET", f"/edit/{pid}/preview?title=%3Cb%3ENew%20title%3C%2Fb%3E", a)
         check("preview: the title as typed, escaped", "&lt;b&gt;New title&lt;/b&gt;" in body and "<b>New" not in body, body[:600])
         E.http("POST", f"/edit/{pid}", a, {"title": "T", "action": "publish"})

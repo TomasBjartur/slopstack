@@ -338,6 +338,8 @@ details.more .center { text-align: left; }
 .edit-tools .fmt { padding: 5px 9px; font-size: 0.85rem; border-color: transparent; background: transparent; }
 .edit-tools .fmt:hover { background: var(--code-bg); }
 .visual-mode .md-help { display: none; }
+/* An empty post in Visual mode says where to start, as the Markdown text does. */
+.wys > .wblock:only-child > p:only-child:has(> br:only-child)::before { content: "Tell your story…"; color: var(--muted); position: absolute; pointer-events: none; }
 /* The save status keeps at least its dot on a narrow screen. */
 .editor-bar .status { min-width: 1.2em; }
 @media (max-width: 600px) { .edit-tools .fmt-bar { flex-wrap: wrap; overflow: visible; } }
