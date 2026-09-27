@@ -6,6 +6,9 @@ pub mod limits;
 #[path = "../spec/http.rs"]
 pub mod spec_http;
 pub mod http;
+#[path = "../spec/authz.rs"]
+pub mod spec_authz;
+pub mod authz;
 pub mod sys {
     pub mod linux;
     pub mod sqlite;
