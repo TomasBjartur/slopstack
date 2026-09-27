@@ -9,6 +9,15 @@ impl App for Site {
     fn handle(&mut self, req: &Request, _now_ms: u64, out: &mut Vec<u8>) -> bool {
         let head = req.method == b"HEAD";
         if req.method == b"POST" {
+            // (Tests: the body back.)
+            if req.target == b"/echo" {
+                out.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ");
+                let mut n = [0u8; 20];
+                out.extend_from_slice(itoa(req.body.len() as u64, &mut n));
+                out.extend_from_slice(b"\r\n\r\n");
+                out.extend_from_slice(req.body);
+                return true;
+            }
             error(out, 404);
             return false;
         }

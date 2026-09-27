@@ -27,6 +27,7 @@ pub struct Request<'a> {
     pub method: &'a [u8],
     pub target: &'a [u8],
     pub headers: &'a [HeaderPos],
+    pub body: &'a [u8],
 }
 
 impl<'a> Request<'a> {
@@ -59,9 +60,46 @@ struct Slot {
     sent: u32,
     /// Close once the output is sent.
     close_after: bool,
+    /// A request whose body is arriving (index into bodies): it holds the
+    /// head and body, filled up to `filled` of `need` bytes.
+    body: u32,
+    need: u32,
 }
 
-const FREE_SLOT: Slot = Slot { open: false, since_ms: 0, head: NONE, filled: 0, out: NONE, sent: 0, close_after: false };
+const FREE_SLOT: Slot = Slot { open: false, since_ms: 0, head: NONE, filled: 0, out: NONE, sent: 0, close_after: false, body: NONE, need: 0 };
+
+/// Where a connection's input is: the shared scratch buffer, its head
+/// buffer, or its body buffer.
+#[derive(Clone, Copy, PartialEq)]
+enum Src {
+    Scratch,
+    Head(u32),
+    Body(u32),
+}
+
+/// A head's Content-Length (0 without one): 400 if repeated or not a
+/// number, 413 past BODY_MAX, 501 with Transfer-Encoding (not accepted).
+fn content_length(head: &[u8], hs: &[HeaderPos]) -> Result<usize, u16> {
+    let mut len: Option<usize> = None;
+    for h in hs {
+        let name = &head[h.start..h.name_end];
+        if name.eq_ignore_ascii_case(b"transfer-encoding") {
+            return Err(501);
+        }
+        if name.eq_ignore_ascii_case(b"content-length") {
+            let v = &head[h.vs..h.ve];
+            if len.is_some() || v.is_empty() || v.len() > 10 || !v.iter().all(|b| b.is_ascii_digit()) {
+                return Err(400);
+            }
+            let n = v.iter().fold(0usize, |a, &b| a * 10 + (b - b'0') as usize);
+            if n > BODY_MAX {
+                return Err(413);
+            }
+            len = Some(n);
+        }
+    }
+    Ok(len.unwrap_or(0))
+}
 
 pub struct Stats {
     pub accepted: u64,
@@ -111,6 +149,9 @@ pub struct Server<I: Io, A: App> {
     big: Pool,
     pending: Vec<Vec<u8>>,
     free_pending: Vec<u32>,
+    bodies: Vec<Vec<u8>>,
+    free_bodies: Vec<u32>,
+    body_bytes: usize,
     scratch: Vec<u8>,
     resp: Vec<u8>,
     hs: Vec<HeaderPos>,
@@ -132,6 +173,9 @@ impl<I: Io, A: App> Server<I, A> {
             big: Pool::new(HEAD_MAX, PARTIAL_MAX),
             pending: (0..PENDING_MAX).map(|_| Vec::new()).collect(),
             free_pending: (0..PENDING_MAX as u32).rev().collect(),
+            bodies: Vec::new(),
+            free_bodies: Vec::new(),
+            body_bytes: 0,
             scratch: vec![0u8; HEAD_MAX],
             resp: Vec::with_capacity(64 * 1024),
             hs: Vec::with_capacity(HEADERS_MAX),
@@ -205,6 +249,7 @@ impl<I: Io, A: App> Server<I, A> {
             return;
         }
         self.drop_head(slot);
+        self.drop_body(slot);
         if s.out != NONE {
             self.release_pending(s.out);
         }
@@ -224,6 +269,55 @@ impl<I: Io, A: App> Server<I, A> {
             *buf = Vec::new();
         }
         self.free_pending.push(p);
+    }
+
+    fn drop_body(&mut self, slot: u32) {
+        let b = self.slots[slot as usize].body;
+        if b == NONE {
+            return;
+        }
+        let v = &mut self.bodies[b as usize];
+        self.body_bytes -= v.len();
+        v.clear();
+        if v.capacity() > 1 << 20 {
+            *v = Vec::new(); // (a large body does not keep its memory)
+        }
+        self.free_bodies.push(b);
+        self.slots[slot as usize].body = NONE;
+        self.slots[slot as usize].need = 0;
+    }
+
+    /// Moves input [0, len) into a body buffer of total bytes, to receive
+    /// the rest of the body. False: over the budget.
+    fn start_body(&mut self, slot: u32, src: Src, len: usize, total: usize) -> bool {
+        if self.body_bytes + total > BODY_BYTES_MAX {
+            return false;
+        }
+        let b = match self.free_bodies.pop() {
+            Some(b) => b,
+            None => {
+                self.bodies.push(Vec::new());
+                (self.bodies.len() - 1) as u32
+            }
+        };
+        let mut v = std::mem::take(&mut self.bodies[b as usize]);
+        v.clear();
+        v.resize(total, 0);
+        match src {
+            Src::Scratch => v[..len].copy_from_slice(&self.scratch[..len]),
+            Src::Head(id) => v[..len].copy_from_slice(&held(&self.small, &self.big, id)[..len]),
+            Src::Body(_) => unreachable!(),
+        }
+        self.bodies[b as usize] = v;
+        self.body_bytes += total;
+        self.drop_head(slot);
+        let now = self.io.now_ms();
+        let sl = &mut self.slots[slot as usize];
+        sl.body = b;
+        sl.filled = len as u32;
+        sl.need = total as u32;
+        sl.since_ms = now;
+        true
     }
 
     fn head_buf(&mut self, id: u32) -> &mut [u8] {
@@ -310,6 +404,21 @@ impl<I: Io, A: App> Server<I, A> {
                 // Still sending: read more once the output is out.
                 return;
             }
+            if s.body != NONE {
+                let (at, need) = (s.filled as usize, s.need as usize);
+                let r = self.io.read(slot, &mut self.bodies[s.body as usize][at..need]);
+                match r {
+                    Rd::Gone => return self.close(slot),
+                    Rd::Later => return,
+                    Rd::Data(n) => {
+                        self.slots[slot as usize].filled = (at + n) as u32;
+                        if at + n == need && !self.process(slot, need, Src::Body(s.body)) {
+                            return;
+                        }
+                    }
+                }
+                continue;
+            }
             let (rd, len, from_scratch) = if s.head != NONE {
                 let at = s.filled as usize;
                 let cap = if s.head & BIG != 0 { HEAD_MAX } else { PARTIAL_SMALL };
@@ -340,35 +449,43 @@ impl<I: Io, A: App> Server<I, A> {
                 Rd::Later => return,
                 Rd::Data(_) => {}
             }
-            if !self.process(slot, len, from_scratch) {
+            let src = if from_scratch { Src::Scratch } else { Src::Head(self.slots[slot as usize].head) };
+            if !self.process(slot, len, src) {
                 return;
             }
         }
     }
 
-    /// Answers the whole requests in the input [0, len) (in scratch or the
-    /// slot's buffer). Answers whether to go on reading.
-    fn process(&mut self, slot: u32, mut len: usize, mut from_scratch: bool) -> bool {
+    /// Answers the whole requests in the input [0, len) (in scratch, the
+    /// slot's head buffer, or its body buffer). Answers whether to go on
+    /// reading.
+    fn process(&mut self, slot: u32, mut len: usize, src: Src) -> bool {
         loop {
-            let s = self.slots[slot as usize];
-            let (parsed, method_end, target_end) = {
-                let buf: &[u8] = if from_scratch { &self.scratch[..len] } else { &held(&self.small, &self.big, s.head)[..len] };
+            let (parsed, method_end, target_end, body_len) = {
+                let buf: &[u8] = match src {
+                    Src::Scratch => &self.scratch[..len],
+                    Src::Head(id) => &held(&self.small, &self.big, id)[..len],
+                    Src::Body(b) => &self.bodies[b as usize][..len],
+                };
                 match parse(buf, &mut self.hs) {
-                    Parsed::Done { method_end, target_end, len: used, .. } => (Ok(used), method_end, target_end),
-                    Parsed::More => (Err(0u16), 0, 0),
-                    Parsed::Bad(c) => (Err(c), 0, 0),
+                    Parsed::Done { method_end, target_end, len: used, .. } => match content_length(&buf[..used], &self.hs) {
+                        Ok(n) => (Ok(used), method_end, target_end, n),
+                        Err(c) => (Err(c), 0, 0, 0),
+                    },
+                    Parsed::More => (Err(0u16), 0, 0, 0),
+                    Parsed::Bad(c) => (Err(c), 0, 0, 0),
                 }
             };
-            match parsed {
+            let used = match parsed {
                 Err(0) => {
                     if len == 0 {
-                        if !from_scratch {
+                        if src != Src::Scratch {
                             self.drop_head(slot);
                         }
                         return true;
                     }
                     // Part of a head: keep it.
-                    if !self.keep(slot, len, from_scratch, len + 1) {
+                    if !self.keep(slot, len, src == Src::Scratch, len + 1) {
                         self.stats.refused += 1;
                         self.fail(slot, 503);
                         return false;
@@ -379,60 +496,75 @@ impl<I: Io, A: App> Server<I, A> {
                     self.fail(slot, code);
                     return false;
                 }
-                Ok(used) => {
-                    self.stats.requests += 1;
-                    let now = self.io.now_ms();
-                    let keep = {
-                        let head: &[u8] = if from_scratch { &self.scratch[..used] } else { &held(&self.small, &self.big, s.head)[..used] };
-                        let req = Request { head, method: &head[..method_end], target: &head[method_end + 1..target_end], headers: &self.hs };
-                        let has_body = req.header(b"content-length").map_or(false, |v| v != b"0") || req.header(b"transfer-encoding").is_some();
-                        self.resp.clear();
-                        if has_body {
-                            // Bodies: not yet (the spike serves GET and HEAD).
-                            error(&mut self.resp, 413);
-                            false
-                        } else {
-                            self.app.handle(&req, now, &mut self.resp)
-                        }
-                    };
-                    // The rest of the input (pipelined requests) to the front.
-                    let rest = len - used;
-                    if from_scratch {
-                        self.scratch.copy_within(used..len, 0);
-                    } else {
-                        let id = s.head;
-                        self.head_buf(id).copy_within(used..len, 0);
-                        self.slots[slot as usize].filled = rest as u32;
-                    }
-                    len = rest;
-                    self.slots[slot as usize].since_ms = now;
-                    self.slots[slot as usize].close_after = !keep;
-                    if !self.send(slot) || !keep {
-                        return false;
-                    }
-                    if self.slots[slot as usize].out != NONE {
-                        // Output waits: keep unread input for later.
-                        if rest > 0 && !self.keep(slot, rest, from_scratch, rest) {
-                            self.close(slot);
-                            return false;
-                        }
-                        if rest == 0 && !from_scratch {
-                            self.drop_head(slot);
-                        }
-                        return false;
-                    }
-                    if rest == 0 {
-                        if !from_scratch {
-                            self.drop_head(slot);
-                        }
-                        return true;
-                    }
-                    let _ = &mut from_scratch;
+                Ok(used) => used,
+            };
+            let total = used + body_len;
+            if len < total {
+                // The body is still arriving.
+                if !self.start_body(slot, src, len, total) {
+                    self.stats.refused += 1;
+                    self.fail(slot, 503);
+                    return false;
                 }
+                return true;
+            }
+            self.stats.requests += 1;
+            let now = self.io.now_ms();
+            let keep = {
+                let buf: &[u8] = match src {
+                    Src::Scratch => &self.scratch[..total],
+                    Src::Head(id) => &held(&self.small, &self.big, id)[..total],
+                    Src::Body(b) => &self.bodies[b as usize][..total],
+                };
+                let head = &buf[..used];
+                let req = Request { head, method: &head[..method_end], target: &head[method_end + 1..target_end], headers: &self.hs, body: &buf[used..total] };
+                let wants_close = req.header(b"connection").map_or(false, |v| v.eq_ignore_ascii_case(b"close"));
+                self.resp.clear();
+                self.app.handle(&req, now, &mut self.resp) && !wants_close
+            };
+            // The rest of the input (pipelined requests) to the front.
+            let rest = len - total;
+            match src {
+                Src::Scratch => self.scratch.copy_within(total..len, 0),
+                Src::Head(id) => {
+                    self.head_buf(id).copy_within(total..len, 0);
+                    self.slots[slot as usize].filled = rest as u32;
+                }
+                Src::Body(_) => {
+                    debug_assert!(rest == 0);
+                    self.drop_body(slot);
+                }
+            }
+            len = rest;
+            self.slots[slot as usize].since_ms = now;
+            self.slots[slot as usize].close_after = !keep;
+            if !self.send(slot) || !keep {
+                return false;
+            }
+            if self.slots[slot as usize].out != NONE {
+                // Output waits: keep unread input for later.
+                if rest > 0 && !self.keep(slot, rest, src == Src::Scratch, rest) {
+                    self.close(slot);
+                    return false;
+                }
+                if rest == 0 {
+                    if let Src::Head(_) = src {
+                        self.drop_head(slot);
+                    }
+                }
+                return false;
+            }
+            if rest == 0 {
+                if let Src::Head(_) = src {
+                    self.drop_head(slot);
+                }
+                return true;
+            }
+            if let Src::Body(_) = src {
+                return true;
             }
         }
     }
-
 
     fn fail(&mut self, slot: u32, code: u16) {
         if self.slots[slot as usize].out != NONE {
@@ -513,7 +645,7 @@ impl<I: Io, A: App> Server<I, A> {
         }
         // Input that waited behind the output.
         if s.head != NONE && s.filled > 0 {
-            if !self.process(slot, s.filled as usize, false) {
+            if !self.process(slot, s.filled as usize, Src::Head(s.head)) {
                 return;
             }
         }
@@ -527,10 +659,18 @@ impl<I: Io, A: App> Server<I, A> {
             if !s.open {
                 continue;
             }
-            let late = if s.head != NONE { now >= s.since_ms + HEAD_TIMEOUT_MS } else { now >= s.since_ms + IDLE_TIMEOUT_MS };
+            let late = if s.body != NONE {
+                // A body: after HEAD_TIMEOUT_MS, at least BODY_MIN_RATE a second.
+                let t = now.saturating_sub(s.since_ms);
+                t >= HEAD_TIMEOUT_MS && (s.filled as u64) < (t - HEAD_TIMEOUT_MS) / 1000 * BODY_MIN_RATE
+            } else if s.head != NONE {
+                now >= s.since_ms + HEAD_TIMEOUT_MS
+            } else {
+                now >= s.since_ms + IDLE_TIMEOUT_MS
+            };
             if late {
                 self.stats.timed_out += 1;
-                if s.head != NONE && s.out == NONE {
+                if (s.head != NONE || s.body != NONE) && s.out == NONE {
                     self.fail(i as u32, 408);
                 } else {
                     self.close(i as u32);

@@ -50,4 +50,16 @@ pub const IDLE_TIMEOUT_MS: u64 = 60_000;
 /// Events handled per wait (the loop's batch).
 pub const EVENTS_MAX: usize = 1024;
 
+/// A request's body. The largest are sync uploads of a pasted manuscript,
+/// sent in pieces of at most SYNC_BODY_MAX (src/doc/); forms are small.
+/// Past it: 413.
+pub const BODY_MAX: usize = 16 * 1024 * 1024;
+
+/// All bodies being received at once, within this. Past it: 503.
+pub const BODY_BYTES_MAX: usize = 512 * 1024 * 1024;
+
+/// A body arrives at least this fast once past its first HEAD_TIMEOUT_MS
+/// (bytes a second): a slow upload does not hold a buffer forever.
+pub const BODY_MIN_RATE: u64 = 16 * 1024;
+
 } // verus!

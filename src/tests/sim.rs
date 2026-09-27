@@ -28,6 +28,11 @@ enum Kind {
     Broken,
     Vanishes,
     Flood,
+    Upload,
+    TooBig,
+    Chunked,
+    TwoLengths,
+    SlowUpload,
 }
 
 /// The answers in a client's bytes: (status, body) each.
@@ -60,6 +65,7 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 struct Plan {
     kind: Kind,
     ids: Vec<String>,
+    body: Vec<u8>,
 }
 
 /// A crowd of clients under one seed. split: heads may arrive in any
@@ -70,14 +76,19 @@ fn run_seed(seed: u64, crowd: usize, split: bool, check: &mut dyn FnMut(bool, St
     let mut rng = Rng(seed.wrapping_mul(0x9e37) | 1);
     let mut plans = vec![];
     for c in 0..crowd {
-        let kind = match rng.below(20) {
+        let kind = match rng.below(26) {
             0..=7 => Kind::Normal,
             8..=10 => Kind::Pipelined,
             11..=12 => Kind::SlowReader,
             13 => Kind::SlowSender,
             14..=15 => Kind::Broken,
             16..=17 => Kind::Vanishes,
-            _ => Kind::Flood,
+            18..=19 => Kind::Flood,
+            20..=21 => Kind::Upload,
+            22 => Kind::TooBig,
+            23 => Kind::Chunked,
+            24 => Kind::TwoLengths,
+            _ => Kind::SlowUpload,
         };
         let n = match kind {
             Kind::Pipelined => 2 + rng.below(6) as usize,
@@ -89,21 +100,36 @@ fn run_seed(seed: u64, crowd: usize, split: bool, check: &mut dyn FnMut(bool, St
         for id in &ids {
             bytes.extend_from_slice(format!("GET /echo/{id} HTTP/1.1\r\nHost: sim\r\nX-Pad: {}\r\n\r\n", "p".repeat(rng.below(400) as usize)).as_bytes());
         }
+        let mut body = vec![];
         match kind {
             Kind::Broken => bytes = b"GET /echo/x HTTP/1.1\r\nBad Header\r\n\r\n".to_vec(),
             Kind::Flood => bytes = b"GET /echo/never-finished HTTP/1.1\r\nX-Slow: ".to_vec(),
+            Kind::Upload | Kind::SlowUpload => {
+                // (In the 100k crowd, form-sized bodies: large uploads are rare,
+                // and the adversarial seeds cover them.)
+                let big = if crowd > 10_000 { 16 * 1024 } else { 256 * 1024 };
+                // (A slow upload: ~2 KB a second, far longer than the grace period.)
+                let n = if kind == Kind::SlowUpload { 64 * 1024 } else { rng.below(big as u64) as usize };
+                body = (0..n).map(|_| rng.next() as u8).collect();
+                bytes = format!("POST /echo HTTP/1.1\r\nContent-Length: {n}\r\n\r\n").into_bytes();
+                bytes.extend_from_slice(&body);
+            }
+            Kind::TooBig => bytes = format!("POST /echo HTTP/1.1\r\nContent-Length: {}\r\n\r\nabc", BODY_MAX + 1).into_bytes(),
+            Kind::Chunked => bytes = b"POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n".to_vec(),
+            Kind::TwoLengths => bytes = b"POST /echo HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabcd".to_vec(),
             _ => {}
         }
         let (window, reads, pace, vanish) = match kind {
             Kind::SlowReader => (64, 16, 5, u64::MAX),
             Kind::SlowSender => (65536, 65536, HEAD_TIMEOUT_MS + 2000, u64::MAX),
+            Kind::SlowUpload => (65536, 65536, 4000, u64::MAX),
             Kind::Vanishes => (65536, 65536, 50, 5 + rng.below(100)),
             Kind::Flood => (65536, 65536, 10, u64::MAX),
             _ => (65536, 65536, 20, u64::MAX),
         };
-        let piece = if kind == Kind::SlowSender { 1 } else if split || rng.below(20) == 0 { usize::MAX } else { 1 << 20 };
+        let piece = if kind == Kind::SlowSender { 1 } else if kind == Kind::SlowUpload { 4096 } else if split || rng.below(20) == 0 { usize::MAX } else { 1 << 20 };
         io.connect(bytes, window, reads, pace, vanish, piece);
-        plans.push(Plan { kind, ids });
+        plans.push(Plan { kind, ids, body });
     }
     let mut s = server::Server::new(io, app::Site);
     // Run past the head and idle timeouts, so every connection ends.
@@ -123,6 +149,11 @@ fn run_seed(seed: u64, crowd: usize, split: bool, check: &mut dyn FnMut(bool, St
             Kind::SlowSender => check(got.len() == 1 && got[0].0 == 408 && c.server_closed, format!("seed {seed} client {i}: too slow a sender: {:?}", got.iter().map(|a| a.0).collect::<Vec<_>>())),
             Kind::Flood => check(got.len() == 1 && (got[0].0 == 408 || got[0].0 == 503) && c.server_closed, format!("seed {seed} client {i}: flood: {:?}", got.iter().map(|a| a.0).collect::<Vec<_>>())),
             Kind::Vanishes => {}
+            Kind::Upload => check(got == vec![(200, p.body.clone())], format!("seed {seed} client {i}: an upload of {} bytes: {:?}", p.body.len(), got.iter().map(|a| (a.0, a.1.len())).collect::<Vec<_>>())),
+            Kind::TooBig => check(got.len() == 1 && got[0].0 == 413 && c.server_closed, format!("seed {seed} client {i}: too big a body: {:?}", got.iter().map(|a| a.0).collect::<Vec<_>>())),
+            Kind::Chunked => check(got.len() == 1 && got[0].0 == 501 && c.server_closed, format!("seed {seed} client {i}: chunked: {:?}", got.iter().map(|a| a.0).collect::<Vec<_>>())),
+            Kind::TwoLengths => check(got.len() == 1 && got[0].0 == 400 && c.server_closed, format!("seed {seed} client {i}: two lengths: {:?}", got.iter().map(|a| a.0).collect::<Vec<_>>())),
+            Kind::SlowUpload => check(got.len() == 1 && got[0].0 == 408 && c.server_closed, format!("seed {seed} client {i}: too slow an upload: {:?}", got.iter().map(|a| a.0).collect::<Vec<_>>())),
         }
     }
     check(s.open_connections() == 0, format!("seed {seed}: {} connections still open after the timeouts", s.open_connections()));
