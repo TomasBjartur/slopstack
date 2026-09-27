@@ -1,0 +1,21 @@
+[Unit]
+Description=slopstack blog server (Rust)
+After=network.target
+
+[Service]
+EnvironmentFile=%h/slopstack/env
+ExecStart=%h/slopstack/server
+WorkingDirectory=%h/slopstack-data
+# The supervisor replaces workers that end; if it ends, systemd restarts
+# the unit, and stopping the unit ends every process in it.
+Restart=always
+RestartSec=2
+# Sandboxing that works without root (user units).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/slopstack-data
+UMask=0077
+
+[Install]
+WantedBy=default.target

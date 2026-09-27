@@ -1,0 +1,25 @@
+# Public edge: TLS (automatic, Let's Encrypt), compression, HSTS. The app
+# listens on 127.0.0.1:8080 only.
+{
+	admin off
+	# Slow clients are held here as well as by the app's own limits
+	# (src/limits.rs: head and body timeouts, a minimum body rate).
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 60s
+			idle 2m
+		}
+	}
+}
+
+{$SLOP_HOST} {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+	header -Server
+	# 16 MiB: the app's BODY_MAX (an editor sync of a long paste).
+	request_body {
+		max_size 16MB
+	}
+	reverse_proxy 127.0.0.1:8080
+}

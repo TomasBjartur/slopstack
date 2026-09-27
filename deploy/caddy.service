@@ -1,0 +1,13 @@
+[Unit]
+Description=Caddy (TLS edge for slopstack)
+After=network.target
+
+[Service]
+EnvironmentFile=%h/slopstack/env
+ExecStart=%h/opt/caddy/caddy run --config %h/slopstack/Caddyfile --adapter caddyfile
+Restart=always
+RestartSec=2
+NoNewPrivileges=no
+
+[Install]
+WantedBy=default.target
