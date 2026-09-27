@@ -32,8 +32,12 @@
 // Positions are UTF-16 units in the whole text, as the CRDT counts them.
 
 const SEG = 8192;       // static pieces are cut at line ends near this size
-const MARGIN = 32768;   // the window reaches this far past the selection
-const EDGE = 12288;     // recentred when the selection comes this close to an edge
+// The window reaches this far past the selection. The browser lays a
+// textarea's text out as one unit: every key re-shapes all of it (measured
+// in Chrome: 22 ms a key with 32 KB each side, in a novel), so it is kept
+// small; moving it costs little.
+const MARGIN = 12288;
+const EDGE = 4096;      // recentred when the selection comes this close to an edge
 const WIDE = 4 * MARGIN; // a window grown past this (a paste) is cut back
 const NEAR = 2;         // pieces on each side of the window always laid out
 const LONG = 16384;     // lines longer than this are cut inside (at a space)
@@ -291,7 +295,10 @@ export class View {
   move(a, b) {
     const lo = Math.min(a, b), hi = Math.max(a, b);
     const w = this.win();
-    if (hi + 2 * MARGIN >= w.s && lo - 2 * MARGIN <= w.e) return this.recut(this.span(lo, hi), a, b);
+    // (Near: the pieces MARGIN either side are re-cut with the window, so
+    // it can be centred on [a, b]; only the pieces next to them, and the
+    // caret stays near the edge, and moves again on the next key.)
+    if (hi + 2 * MARGIN >= w.s && lo - 2 * MARGIN <= w.e) return this.recut(this.span(lo - MARGIN, hi + MARGIN), a, b);
     const focused = document.activeElement === this.ta;
     // The window's text, static in its place.
     const frozen = this.cut(w.s, w.e, this.pieces[w.i].gap);

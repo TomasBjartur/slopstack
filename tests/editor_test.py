@@ -377,7 +377,8 @@ def main():
         br.keys("zz")
         check("read-only until loaded; typing then is refused", ro is True and "zz" not in br.text(), (ro, br.text()[:40]))
         time.sleep(2.5)
-        check("then editable, with the whole document", br.js("document.getElementById('editor').readOnly") is False and br.text() == big,
+        # (The whole text: the textarea holds only a window of a long one.)
+        check("then editable, with the whole document", br.js("document.getElementById('editor').readOnly") is False and br.js(f"{ED}.view.text") == big,
               (br.js("document.getElementById('editor').readOnly"), len(br.text())))
         br.ws.call("Page.removeScriptToEvaluateOnNewDocument", {"identifier": slow["identifier"]})
     finally:

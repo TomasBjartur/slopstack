@@ -21,6 +21,7 @@ run python3 tests/browser_test.py
 run python3 tests/collab_test.py
 run python3 tests/editor_test.py
 run python3 tests/large_test.py
+run python3 tests/large_test.py 6000000
 for t in usability_test ux_test; do
   [ -f tests/$t.py ] && run python3 tests/$t.py
 done

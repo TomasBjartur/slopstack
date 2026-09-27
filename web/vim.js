@@ -190,6 +190,33 @@ function textObject(t, i, kind, around) {
 }
 
 // A diff of a change: at p, `del` replaced by `ins`.
+// One change to t: [a, b) becomes x. Answers the new text and the change
+// ({p, del, ins}, the deleted text as a string), so neither the undo
+// record nor the editor has to find it again by comparing whole texts
+// (megabytes, for a novel).
+function splice(t, a, b, x) {
+  return { u: t.slice(0, a) + x + t.slice(b), d: { p: a, del: t.slice(a, b), ins: x } };
+}
+
+// Vim.normalize(u, c) for u = t with the change d, reading only t and d.
+function normalizeAfter(t, d, c) {
+  const n = t.length - d.del.length + d.ins.length;
+  const e = d.p + d.ins.length, shift = d.del.length - d.ins.length;
+  const at = (i) => (i < d.p ? t.charCodeAt(i) : i < e ? d.ins.charCodeAt(i - d.p) : t.charCodeAt(i + shift));
+  c = clamp(c, 0, n);
+  if (c >= n || at(c) === 10) {
+    let s = c;
+    while (s > 0 && at(s - 1) !== 10) s--;
+    if (c > s) c -= at(c - 1) >= 0xdc00 && at(c - 1) <= 0xdfff && c >= 2 ? 2 : 1; // (prev())
+  }
+  return c;
+}
+
+// A change as the editor takes it: at p, del units removed, ins put in.
+function asEdit(d) {
+  return d ? { p: d.p, del: d.del.length, ins: d.ins } : null;
+}
+
 function diff(a, b) {
   const p = prefix(a, b);
   const s = suffix(a, b, p);
@@ -367,11 +394,13 @@ export class Vim {
       case "A": return this.insert(t, lineEnd(t, cur), keys);
       case "o": {
         const e = lineEnd(t, cur);
-        return this.insert(t.slice(0, e) + "\n" + t.slice(e), e + 1, keys, t, cur);
+        const { u, d } = splice(t, e, e, "\n");
+        return this.insert(u, e + 1, keys, t, cur, d);
       }
       case "O": {
         const s0 = lineStart(t, cur);
-        return this.insert(t.slice(0, s0) + "\n" + t.slice(s0), s0, keys, t, cur);
+        const { u, d } = splice(t, s0, s0, "\n");
+        return this.insert(u, s0, keys, t, cur, d);
       }
       case "v":
       case "V":
@@ -404,14 +433,15 @@ export class Vim {
           e = next(t, e);
         }
         const ch = c === "Enter" ? "\n" : c;
-        const u = t.slice(0, cur) + ch.repeat(n) + t.slice(e);
-        return this.changed(t, u, c === "Enter" ? cur + 1 : cur + ch.length * n - ch.length, keys, cur);
+        const { u, d } = splice(t, cur, e, ch.repeat(n));
+        return this.changed(t, u, c === "Enter" ? cur + 1 : cur + ch.length * n - ch.length, keys, cur, d);
       }
       case "~": {
         let e = cur;
         for (let j = 0; j < n && e < lineEnd(t, cur); j++) e = next(t, e);
         const sw = [...t.slice(cur, e)].map((c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase())).join("");
-        return this.changed(t, t.slice(0, cur) + sw + t.slice(e), Math.min(e, lastOn(t, cur)), keys, cur);
+        const { u, d } = splice(t, cur, e, sw);
+        return this.changed(t, u, Math.min(e, lastOn(t, cur)), keys, cur, d);
       }
       case "J": {
         let u = t, c = cur;
@@ -622,27 +652,27 @@ export class Vim {
       const lines = t.slice(s0, lineEnd(t, b > a ? prev(t, b) : a)).split("\n");
       const out = lines.map((l) => (op === ">" ? (l ? "  " + l : l) : l.replace(/^( {1,2}|\t)/, ""))).join("\n");
       const e0 = s0 + lines.join("\n").length;
-      const u = t.slice(0, s0) + out + t.slice(e0);
-      return this.changed(t, u, firstNonBlank(u, s0), keys, cur);
+      const { u, d } = splice(t, s0, e0, out);
+      return this.changed(t, u, firstNonBlank(u, s0), keys, cur, d);
     }
     if (line) {
       this.reg = { text: t.slice(a, b) + "\n", line: true };
       if (op === "c") {
         const indent = t.slice(a, firstNonBlank(t, a));
-        const u = t.slice(0, a) + indent + t.slice(b);
-        return this.insert(u, a + indent.length, keys, t, cur);
+        const { u, d } = splice(t, a, b, indent);
+        return this.insert(u, a + indent.length, keys, t, cur, d);
       }
       // Delete the lines and one line break with them.
       let s = a, e = b;
       if (e < t.length) e++;
       else if (s > 0) s--;
-      const u = t.slice(0, s) + t.slice(e);
-      return this.changed(t, u, firstNonBlank(u, Math.min(s === a ? a : s + 1, u.length)), keys, cur);
+      const { u, d } = splice(t, s, e, "");
+      return this.changed(t, u, firstNonBlank(u, Math.min(s === a ? a : s + 1, u.length)), keys, cur, d);
     }
     this.reg = { text: t.slice(a, b), line: false };
-    const u = t.slice(0, a) + t.slice(b);
-    if (op === "c") return this.insert(u, a, keys, t, cur);
-    return this.changed(t, u, a, keys, cur);
+    const { u, d } = splice(t, a, b, "");
+    if (op === "c") return this.insert(u, a, keys, t, cur, d);
+    return this.changed(t, u, a, keys, cur, d);
   }
 
   visualKey(t, cur, k, rest, n) {
@@ -672,7 +702,8 @@ export class Vim {
         const f = k === "u" ? s.toLowerCase() : k === "U" ? s.toUpperCase()
           : [...s].map((c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase())).join("");
         this.mode = "normal";
-        return this.changed(t, t.slice(0, r.a) + f + t.slice(r.b), r.a, null, cur);
+        const { u, d } = splice(t, r.a, r.b, f);
+        return this.changed(t, u, r.a, null, cur, d);
       }
       case "i": case "a":
         if (rest.length === 0) return "more";
@@ -694,30 +725,33 @@ export class Vim {
     if (line) {
       const at = before ? lineStart(t, cur) : lineEnd(t, cur) + (lineEnd(t, cur) < t.length ? 1 : 0);
       const ins = at === t.length && !before && !t.endsWith("\n") && t !== "" ? "\n" + body.slice(0, -1) : body;
-      const u = t.slice(0, at) + ins + t.slice(at);
-      return this.changed(t, u, firstNonBlank(u, at === t.length && ins.startsWith("\n") ? at + 1 : at), keys, cur);
+      const { u, d } = splice(t, at, at, ins);
+      return this.changed(t, u, firstNonBlank(u, at === t.length && ins.startsWith("\n") ? at + 1 : at), keys, cur, d);
     }
     const at = before || cur >= t.length || t[cur] === "\n" ? cur : next(t, cur);
-    const u = t.slice(0, at) + body + t.slice(at);
-    return this.changed(t, u, prev(u, at + body.length), keys, cur);
+    const { u, d } = splice(t, at, at, body);
+    return this.changed(t, u, prev(u, at + body.length), keys, cur, d);
   }
 
   // Insert mode at c, in text u (made from t by the command, if any).
-  insert(u, c, keys, t = u, cur = c) {
+  insert(u, c, keys, t = u, cur = c, d = null) {
     this.mode = "insert";
     this.insertFrom = { text: t, cur, after: u };
     this.change = keys ? keys.slice() : null;
-    return { text: u, a: c, b: c, mode: "insert" };
+    return { text: u, a: c, b: c, mode: "insert", edit: asEdit(d) };
   }
 
   // A normal-mode change from t to u, the cursor at c: one undo step.
-  changed(t, u, c, keys, cur) {
+  // d: the change, when the caller knows it (else found by comparing).
+  changed(t, u, c, keys, cur, d = null) {
     if (u !== t) {
-      this.record(diff(t, u), cur);
+      this.record(d || diff(t, u), cur);
       if (keys) this.last = { keys: keys.slice(), insert: null };
     }
-    const n = Vim.normalize(u, c);
-    return { text: u, a: n, b: n };
+    // (With the change known, the cursor is placed reading t and the
+    // change: reading u would make the engine copy the whole new text.)
+    const n = d ? normalizeAfter(t, d, c) : Vim.normalize(u, c);
+    return { text: u, a: n, b: n, edit: u === t ? null : asEdit(d) };
   }
 
   // Undo: the change is found where it was (other people's edits may have
@@ -737,7 +771,8 @@ export class Vim {
     }
     if (!done) return { text: t, a: 0, b: 0, msg: "Already at oldest change", keepCursor: true };
     const k = Vim.normalize(u, c);
-    return { text: u, a: k, b: k };
+    const r = this.redos[this.redos.length - 1];
+    return { text: u, a: k, b: k, edit: done === 1 ? { p: r.p, del: r.ins.length, ins: r.del } : null };
   }
 
   redo(t, n) {
@@ -754,7 +789,8 @@ export class Vim {
     }
     if (!done) return { text: t, a: 0, b: 0, msg: "Already at newest change", keepCursor: true };
     const k = Vim.normalize(u, c);
-    return { text: u, a: k, b: k };
+    const r = this.undos[this.undos.length - 1];
+    return { text: u, a: k, b: k, edit: done === 1 ? { p: r.p, del: r.del.length, ins: r.ins } : null };
   }
 
   // ".": the last change again at the cursor (count: in place of its own).

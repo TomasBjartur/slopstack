@@ -32,6 +32,7 @@ function tokens(s) {
 
 // What the textarea would do: in insert mode keys type (Enter a newline,
 // Backspace deletes); otherwise the Vim core decides.
+let editFails = 0, editsSeen = 0;
 function drive(vim, st, keys) {
   for (const k of keys) {
     if (vim.mode === "insert" && vim.cmd === null) {
@@ -47,6 +48,17 @@ function drive(vim, st, keys) {
       continue;
     }
     const r = vim.key(k, st);
+    // A reported edit must be exactly the change (the editor applies it
+    // in place of the whole text).
+    if (r && r.edit) {
+      const { p, del, ins } = r.edit;
+      const got = st.text.slice(0, p) + ins + st.text.slice(p + del);
+      if (got !== r.text) {
+        editFails++;
+        if (editFails <= 3) console.log("EDIT MISMATCH", JSON.stringify({ k, text: st.text.slice(0, 80), edit: r.edit }));
+      }
+      editsSeen++;
+    }
     if (r) st = { text: r.text, a: r.keepCursor ? st.a : r.a, b: r.keepCursor ? st.b : r.b, save: r.save || st.save };
   }
   return st;
@@ -232,6 +244,7 @@ for (let round = 0; round < Number(process.env.ROUNDS ?? 3000) && bad < 5; round
   if (!ok) bad++;
 }
 check("random key sequences: cursor in the text, undo and redo exact", bad === 0, bad + " bad");
+check(`every edit Vim reports is exactly its change (${editsSeen} edits)`, editFails === 0 && editsSeen > 1000, editFails + " wrong");
 
 console.log(`\n${fails} failure(s)`);
 process.exit(fails ? 1 : 0);

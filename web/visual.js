@@ -17,17 +17,22 @@
 // render gives the same HTML for random documents; typing and the toolbar
 // change the text as expected).
 import { render as renderMd } from "./crdt.js";
+import { diff } from "./view.js";
 
 // A block past this is shown read-only: 10x the longest paragraph we can
 // imagine (DESIGN.md: 150 KB); the WebAssembly renderer takes ~50 ms for it.
 const BLOCK_MAX = 1500000;
-export const VISUAL_MAX = 8000000; // (every post the server takes)
+// Past this, Visual mode is refused (the post is edited as Markdown): above
+// the longest novel (~6M characters, measured within budget:
+// tests/large_test.py 6000000), below the 10x case, where each key's
+// work on the whole text (a JS string of that length) would be too slow.
+export const VISUAL_MAX = 8000000;
 // Blocks are rendered when they come this near the screen (the renderer
 // takes ~3 ms a KB: a novel at once would take seconds); until then each
 // shows its Markdown as plain text, not editable, and far-off ones are
 // skipped by the browser (content-visibility). The first and last EAGER
 // blocks are rendered at once (Ctrl+Home and Ctrl+End land in them).
-const AHEAD = "2000px";
+const AHEAD_PX = 2000;
 const EAGER = 8;
 
 // The text as prefix + blocks, each {md, sep}: text = prefix + md0 + sep0
@@ -180,13 +185,31 @@ export class Visual {
     this.root = root;
     this.onChange = onChange;
     this.prefix = "";
+    this.last = null; // the text's parts as last reported (see commit)
+    this.stray = false; // something was added straight into the root
     this.dirty = new Set();
     this.observer = new MutationObserver((recs) => this.collect(recs));
-    this.seen = new IntersectionObserver((es) => {
-      for (const e of es) if (e.isIntersecting) this.draw(e.target);
-    }, { rootMargin: AHEAD + " 0px" });
+    // Blocks are drawn as they come near the screen, found from scroll
+    // events: at most once a frame, walking out from the block on screen.
+    // (An IntersectionObserver on every block cost 18 ms a key in a novel:
+    // the browser checks all of them after every change.)
+    this.queued = false;
+    this.opened = false;
+    this.onScroll = () => {
+      if (this.queued || !this.opened) return;
+      this.queued = true;
+      requestAnimationFrame(() => {
+        this.queued = false;
+        this.drawNear();
+      });
+    };
     // Before the browser types into an emptied view, there is a paragraph.
     root.addEventListener("beforeinput", () => this.ensure());
+    // Find in page reached a block not drawn yet: draw it.
+    root.addEventListener("beforematch", (ev) => {
+      const b = blockOf(root, ev.target);
+      if (b) this.draw(b);
+    });
     root.addEventListener("input", (ev) => {
       if (!this.shortcut(ev)) this.commit();
     });
@@ -202,7 +225,12 @@ export class Visual {
   // The blocks mutations touched (and blocks added at the top level).
   collect(recs) {
     for (const r of recs) {
-      if (r.target === this.root) for (const a of r.addedNodes) this.dirty.add(a);
+      if (r.target === this.root)
+        for (const a of r.addedNodes) {
+          this.dirty.add(a);
+          // (Content typed straight into the root: gather() has work.)
+          if (a.nodeType !== 1 || !a.classList.contains("wblock")) this.stray = true;
+        }
       const b = blockOf(this.root, r.target);
       if (b) this.dirty.add(b);
     }
@@ -210,32 +238,39 @@ export class Visual {
 
   open(text) {
     document.execCommand("defaultParagraphSeparator", false, "p");
+    this.opened = true;
     this.show(split(text));
     this.observer.observe(this.root, { childList: true, subtree: true, characterData: true });
+    window.addEventListener("scroll", this.onScroll, { passive: true });
+    window.addEventListener("resize", this.onScroll, { passive: true });
   }
 
   close() {
+    this.opened = false;
+    this.last = null;
     this.observer.disconnect();
-    this.seen.disconnect();
+    window.removeEventListener("scroll", this.onScroll);
+    window.removeEventListener("resize", this.onScroll);
     this.root.replaceChildren();
   }
 
-  // A block, not rendered yet (see AHEAD).
+  // A block, not rendered yet (see AHEAD_PX).
   block(b) {
     const el = document.createElement("div");
     el.className = "wblock wlazy";
     el.contentEditable = "false";
+    // (Skipped by the browser without watching it; found by find in page.)
+    el.setAttribute("hidden", "until-found");
     el.textContent = b.md;
     el.md = b.md;
     el.sep = b.sep;
-    this.seen.observe(el);
     return el;
   }
 
   // Renders a block (its Markdown is kept: rendering is not an edit).
   draw(el) {
     if (!el.classList.contains("wlazy")) return;
-    this.seen.unobserve(el);
+    el.removeAttribute("hidden");
     const others = this.observer.takeRecords();
     const html = render(el.md);
     el.classList.remove("wlazy");
@@ -266,8 +301,48 @@ export class Visual {
     }
     this.root.replaceChildren(...els);
     for (let i = 0; i < els.length; i++) if (i < EAGER || i >= els.length - EAGER) this.draw(els[i]);
+    this.drawNear();
     this.observer.takeRecords();
     this.dirty.clear();
+    this.last = this.parts();
+  }
+
+  // Draws the blocks within AHEAD_PX of the screen: from the block on screen
+  // (or the first or last, when the view is above or below it) outwards,
+  // until a block is that far away.
+  drawNear() {
+    const r = this.root.getBoundingClientRect();
+    const h = window.innerHeight;
+    // (Not shown yet, as when opening: nothing is near; asked again once it is.)
+    if (r.height === 0) return this.onScroll();
+    if (!this.root.firstElementChild || r.bottom < -AHEAD_PX || r.top > h + AHEAD_PX) return;
+    let mid = null;
+    if (r.top > 0) mid = this.root.firstElementChild;
+    else if (r.bottom < h) mid = this.root.lastElementChild;
+    else {
+      const x = Math.min(Math.max(r.left + 10, 0), window.innerWidth - 1);
+      const hit = document.elementFromPoint(x, h / 2);
+      mid = hit && this.root.contains(hit) ? blockOf(this.root, hit) : null;
+      if (!mid) {
+        // (Between blocks: a quick search by position.)
+        const kids = this.root.children;
+        let lo = 0, hi = kids.length - 1;
+        while (lo < hi) {
+          const m = (lo + hi) >> 1;
+          if (kids[m].getBoundingClientRect().bottom < h / 2) lo = m + 1;
+          else hi = m;
+        }
+        mid = kids[lo];
+      }
+    }
+    for (let el = mid; el; el = el.nextElementSibling) {
+      if (el.getBoundingClientRect().top > h + AHEAD_PX) break;
+      this.draw(el);
+    }
+    for (let el = mid && mid.previousElementSibling; el; el = el.previousElementSibling) {
+      if (el.getBoundingClientRect().bottom < -AHEAD_PX) break;
+      this.draw(el);
+    }
   }
 
   // Markdown shortcuts: "## ", "### ", "- ", "1. " or "> " typed at the
@@ -299,7 +374,12 @@ export class Visual {
     return true;
   }
 
-  // An edit: the touched blocks become Markdown again.
+  // An edit: the touched blocks become Markdown again, and the change is
+  // reported as it is ({p, del, ins}): the parts of the text before and
+  // after are compared part by part (unchanged blocks are the same
+  // strings), and only the stretch that differs is compared character by
+  // character. A novel is tens of thousands of blocks; the whole text is
+  // never built for an edit.
   commit() {
     this.collect(this.observer.takeRecords());
     this.gather();
@@ -309,7 +389,19 @@ export class Visual {
       el.md = serialize(el);
     }
     this.dirty.clear();
-    this.onChange(this.text());
+    const prev = this.last, next = this.parts();
+    this.last = next;
+    if (!prev) return this.onChange(next.join(""));
+    let a = 0;
+    while (a < prev.length && a < next.length && prev[a] === next[a]) a++;
+    if (a === prev.length && a === next.length) return;
+    let z = 0;
+    while (z < prev.length - a && z < next.length - a && prev[prev.length - 1 - z] === next[next.length - 1 - z]) z++;
+    let p = 0;
+    for (let i = 0; i < a; i++) p += prev[i].length;
+    const d = diff(prev.slice(a, prev.length - z).join(""), next.slice(a, next.length - z).join(""));
+    if (d.del === 0 && d.ins === "") return;
+    this.onChange({ p: p + d.p, del: d.del, ins: d.ins });
   }
 
   // Content typed straight into the root (Safari does, once everything was
@@ -317,6 +409,10 @@ export class Visual {
   // caret put back where it was (moving a node takes a selection out of
   // it: typing then went on in the root, a letter per block).
   gather() {
+    // (Only when something landed in the root: walking every block on every
+    // key costs milliseconds in a novel.)
+    if (!this.stray) return this.ensure();
+    this.stray = false;
     const sel = document.getSelection();
     const at = sel && sel.rangeCount ? { node: sel.anchorNode, off: sel.anchorOffset } : null;
     let moved = false;
@@ -360,14 +456,21 @@ export class Visual {
   // followed by what ended the text (whichever block is last now: one
   // joined into the one before takes its place).
   text() {
-    const kids = [...this.root.children].filter((el) => el.md);
-    let t = this.prefix;
-    kids.forEach((el, i) => {
-      let sep = i === kids.length - 1 ? this.tail : el.sep ?? "";
-      if (i < kids.length - 1 && !/\n[ \t]*\n/.test(sep)) sep = "\n\n";
-      t += el.md + sep;
-    });
-    return t;
+    return this.parts().join("");
+  }
+
+  // The text in parts, in order: the prefix, then each block's Markdown
+  // and what follows it.
+  parts() {
+    const out = [this.prefix];
+    let prev = null;
+    for (let el = this.root.firstElementChild; el; el = el.nextElementSibling) {
+      if (!el.md) continue;
+      if (prev) out.push(prev.md, between(prev));
+      prev = el;
+    }
+    if (prev) out.push(prev.md, this.tail);
+    return out;
   }
 
   // The text changed elsewhere (another writer): re-render what differs.
@@ -386,7 +489,6 @@ export class Visual {
     const fresh = next.blocks.slice(a, next.blocks.length - z).map((b) => this.block(b));
     const after = olds[olds.length - z] || null;
     for (const el of olds.slice(a, olds.length - z)) {
-      this.seen.unobserve(el);
       el.remove();
     }
     for (const el of fresh) this.root.insertBefore(el, after);
@@ -401,7 +503,20 @@ export class Visual {
     }
     this.dirty.clear();
     this.observer.takeRecords();
+    this.last = this.parts();
   }
+}
+
+// What separates a block from the next: its own separator if that has a
+// blank line, else a blank line (cached on the element: the same answer
+// until its separator changes).
+function between(el) {
+  const sep = el.sep ?? "";
+  if (el._sepFor !== sep) {
+    el._sepFor = sep;
+    el._sepIs = /\n[ \t]*\n/.test(sep) ? sep : "\n\n";
+  }
+  return el._sepIs;
 }
 
 function blockOf(root, n) {

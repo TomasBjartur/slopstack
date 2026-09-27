@@ -369,11 +369,14 @@ def main():
             got = br.full()
             check("…typing in a paragraph there changes that place in the Markdown", got == text[:at] + "Q" + text[at:], (got[at - 5: at + 20] if got else None))
             text = got
-            med, worst = br.per_key("uick")
+            med, worst = br.per_key("uick brown fox")
             print(f"  typing in Visual mode: {med:.1f} ms a key (worst {worst:.1f})")
             check("…typing in Visual mode: within three frames", med < 50, med)
-            time.sleep(0.3)
-            text = br.full()
+            time.sleep(0.5)
+            got = br.full()
+            check("…each key a small change in the Markdown, exactly there", got == text[:at + 1] + "uick brown fox" + text[at + 1:], (got[at - 5: at + 30] if got else None))
+            check("…and in the document (the CRDT)", br.js(f"{B}.doc().text() === {B}.view.text"))
+            text = got
         br.js("document.querySelector('.edit-tools .seg:nth-child(1)').click()")
         time.sleep(0.3)
         check("back to Markdown mode, the same text", br.full() == text)

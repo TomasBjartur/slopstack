@@ -41,11 +41,13 @@ function el(tag, attrs = {}, ...kids) {
   return e;
 }
 
-// view: the Markdown view (src/web/view.js); set(text, a, b): replace the
+// view: the Markdown view (web/view.js); set(text, a, b): replace the
 // text as an edit (CRDT, history and status follow), then select [a, b];
+// edit(p, del, ins): the same for a change already known (preferred: no
+// comparison of whole texts, which are megabytes in a novel);
 // save(): save now; undo(), redo(): the editor's; upload(file) ->
 // "/img/..." or null.
-export function setupModes(view, { set, save, undo, redo, upload, show }) {
+export function setupModes(view, { set, edit, save, undo, redo, upload, show }) {
   const ta = view.ta;
   const md = el("button", { type: "button", class: "seg", "aria-pressed": "true", text: "Markdown" });
   const vis = el("button", { type: "button", class: "seg", "aria-pressed": "false", text: "Visual" });
@@ -69,7 +71,8 @@ export function setupModes(view, { set, save, undo, redo, upload, show }) {
   const dialog = vimDialog();
   document.body.appendChild(dialog);
 
-  const visual = new Visual(wys, (text) => set(text));
+  // Visual mode reports a change ({p, del, ins}) or, rarely, the whole text.
+  const visual = new Visual(wys, (ch) => (typeof ch === "string" ? set(ch) : edit(ch.p, ch.del, ch.ins)));
   let mode = "markdown";
 
   // MODES
@@ -228,7 +231,9 @@ export function setupModes(view, { set, save, undo, redo, upload, show }) {
     const s = view.sel();
     const r = vim.key(k, { text: view.text, a: s.a, b: s.b });
     if (!r) return;
-    if (r.text !== view.text) set(r.text);
+    // The change as Vim made it (no whole-text comparison), else found.
+    if (r.edit) edit(r.edit.p, r.edit.del, r.edit.ins);
+    else if (r.text !== view.text) set(r.text);
     if (r.keepCursor) block(view.sel().a);
     else if (vim.mode === "insert") view.select(r.a, r.a, true);
     else if (vim.mode === "visual" || vim.mode === "vline") view.select(r.a, r.b, true);

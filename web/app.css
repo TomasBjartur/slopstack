@@ -163,6 +163,7 @@ h2 { font-size: 1.35rem; margin: 40px 0 12px; }
 .comment .cbody img { max-height: 400px; width: auto; }
 .body ul, .body ol { padding-left: 1.4em; }
 .body li { margin: 0.3em 0; }
+.body blockquote > :last-child { margin-bottom: 0; }
 .body blockquote { margin-left: 0; padding: 2px 0 2px 1.1em; border-left: 3px solid var(--accent); color: var(--muted); font-style: italic; }
 .body code { font: 0.86em/1.5 var(--mono); background: var(--code-bg); padding: 2px 5px; border-radius: 4px; }
 .body pre { background: var(--code-bg); padding: 16px 18px; border-radius: var(--radius); overflow-x: auto; font-size: 0.95rem; line-height: 1.55; }
@@ -347,7 +348,9 @@ details.more .center { text-align: left; }
 .wys .wblock > :last-child { margin-bottom: 1.35em; }
 .wys blockquote > :last-child { margin-bottom: 0; }
 /* Not rendered yet (src/web/visual.js): its Markdown as text; skipped off screen. */
-.wys .wlazy { white-space: pre-wrap; color: var(--muted); content-visibility: auto; contain-intrinsic-size: auto 6em; margin-bottom: 1.35em; }
+/* Blocks not drawn yet: hidden="until-found" (skipped, not watched: find
+   in page still reveals them), as tall as a guess. */
+.wys .wlazy { white-space: pre-wrap; color: var(--muted); contain-intrinsic-size: auto 6em; margin-bottom: 1.35em; }
 .wys .wraw { white-space: pre-wrap; font: 0.9rem/1.5 var(--mono); color: var(--muted); border-left: 3px solid var(--line); padding-left: 12px; margin-bottom: 1.35em; }
 .wys pre { white-space: pre-wrap; font: 0.9rem/1.5 var(--mono); background: var(--code-bg); padding: 12px 14px; border-radius: 6px; }
 dialog.modal { border: 1px solid var(--line); border-radius: 14px; padding: 26px 28px; max-width: 460px; width: calc(100vw - 32px); background: var(--surface); color: var(--fg); box-shadow: 0 20px 60px rgb(0 0 0 / 0.25); }

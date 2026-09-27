@@ -277,6 +277,10 @@ function start(ta) {
       const d = diff(view.text, next);
       change(d.p, d.del, d.ins, a, b);
     },
+    edit(p, del, ins) {
+      if (view.readOnly || (del === 0 && ins === "")) return;
+      change(p, del, ins);
+    },
     save() {
       if (form) form.requestSubmit();
     },
