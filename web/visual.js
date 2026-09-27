@@ -156,10 +156,7 @@ function blocksOf(el) {
       if (s) out.push("### " + s);
     } else if (tag === "UL" || tag === "OL") {
       const items = [];
-      for (const li of n.querySelectorAll(":scope > li")) {
-        const s = inline(li).replace(/\n/g, " ").trim();
-        if (s) items.push((tag === "OL" ? items.length + 1 + ". " : "- ") + s);
-      }
+      listItems(n, 0, items);
       if (items.length) out.push(items.join("\n"));
     } else if (tag === "BLOCKQUOTE") {
       const inner = blocksOf(n).join("\n\n");
@@ -517,6 +514,29 @@ function between(el) {
     el._sepIs = /\n[ \t]*\n/.test(sep) ? sep : "\n\n";
   }
   return el._sepIs;
+}
+
+// A list's items as Markdown lines, nested lists indented to their
+// parent item's text (CommonMark: a sub-list starts at the column of the
+// item's content). Both shapes of nesting: a list inside an item (as the
+// renderer makes it) and a list right inside a list (as the browser's
+// indent command makes it: it belongs to the item before it).
+function listItems(list, indent, out) {
+  const ordered = list.tagName === "OL";
+  let k = 0, width = ordered ? 3 : 2;
+  for (const c of list.children) {
+    if (c.tagName === "LI") {
+      const own = c.cloneNode(true);
+      for (const sub of own.querySelectorAll(":scope > ul, :scope > ol")) sub.remove();
+      const s = inline(own).replace(/\n/g, " ").trim();
+      const marker = ordered ? ++k + ". " : "- ";
+      width = marker.length;
+      if (s) out.push(" ".repeat(indent) + marker + s);
+      for (const sub of c.querySelectorAll(":scope > ul, :scope > ol")) listItems(sub, indent + width, out);
+    } else if (c.tagName === "UL" || c.tagName === "OL") {
+      listItems(c, indent + width, out);
+    }
+  }
 }
 
 function blockOf(root, n) {

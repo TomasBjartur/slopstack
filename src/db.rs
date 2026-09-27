@@ -257,6 +257,7 @@ queries! {
     EditGet => "SELECT p.title, p.slug, p.published, b.slug, b.id, '', p.published_ms IS NULL, p.draft_title FROM post p JOIN blog b ON b.id = p.blog_id WHERE p.id = ?1",
     DraftSave => "UPDATE post SET draft_title = ?2, title = CASE WHEN published THEN title ELSE ?2 END, updated_ms = ?3 WHERE id = ?1",
     PostPublish => "UPDATE post SET title = ?2, draft_title = ?2, body_md = ?3, words = ?4, published = 1, published_ms = coalesce(published_ms, ?5), updated_ms = ?5, slug = ?6 WHERE id = ?1",
+    PreviewInfo => "SELECT p.draft_title, b.slug, b.title, coalesce(u.name, ''), coalesce(u.handle, ''), coalesce(p.published_ms, 0) FROM post p JOIN blog b ON b.id = p.blog_id LEFT JOIN user u ON u.id = p.author_id WHERE p.id = ?1",
     Edited => "UPDATE post SET edited_ms = ?2 WHERE id = ?1",
     RepNew => "UPDATE post SET reps = reps + 1 WHERE id = ?1 RETURNING reps",
     RepAdd => "INSERT INTO doc_rep(post_id, rep, user_id) VALUES (?1, ?2, ?3)",

@@ -155,6 +155,17 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
       }
     }
   }
+  // Tab in Visual mode: inside a list, the item nests (Shift+Tab: back
+  // out); elsewhere Tab moves on, as on any page.
+  wys.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Tab" || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const sel = document.getSelection();
+    const n = sel && sel.anchorNode;
+    const li = n && (n.nodeType === 1 ? n : n.parentNode).closest("li");
+    if (!li || !wys.contains(li)) return;
+    ev.preventDefault();
+    document.execCommand(ev.shiftKey ? "outdent" : "indent");
+  });
   wys.addEventListener("beforeinput", (ev) => {
     if (ev.inputType === "historyUndo" || ev.inputType === "historyRedo") {
       ev.preventDefault();
@@ -241,6 +252,61 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
     line(r.msg || r.pending || "");
     if (r.save) save();
   });
+  // TAB. In Markdown mode: a tab character, or with lines selected (or
+  // Shift), each line indented (a tab) or outdented (a tab or up to four
+  // spaces). Vim's normal mode leaves Tab alone, as Vim does. To leave the
+  // editor by keyboard: Esc, then Tab (the textarea keeps Tab otherwise).
+  let escaped = false;
+  ta.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      escaped = !vimOn;
+      return;
+    }
+    if (ev.key !== "Tab" || ev.ctrlKey || ev.metaKey || ev.altKey || ev.defaultPrevented || ev.isComposing) {
+      if (ev.key !== "Shift") escaped = false;
+      return;
+    }
+    if (escaped) {
+      escaped = false;
+      return; // (the browser moves the focus on)
+    }
+    if (mode !== "markdown" || view.readOnly || (vimOn && vim.mode !== "insert")) return;
+    ev.preventDefault();
+    tab(ev.shiftKey);
+  });
+
+  function tab(out) {
+    const t = view.text;
+    const s = view.sel();
+    if (s.a === s.b && !out) {
+      edit(s.a, 0, "\t", s.a + 1, s.a + 1);
+      return;
+    }
+    // The whole lines the selection touches (a selection ending at a
+    // line's start does not take that line).
+    const ls = t.lastIndexOf("\n", s.a - 1) + 1;
+    const last = s.b > s.a && t[s.b - 1] === "\n" ? s.b - 1 : s.b;
+    let le = t.indexOf("\n", last);
+    if (le < 0) le = t.length;
+    const lines = t.slice(ls, le).split("\n");
+    let da = 0, db = 0; // how far the selection's ends move
+    const next = lines.map((l, i) => {
+      let n;
+      if (!out) n = l === "" && lines.length > 1 ? l : "\t" + l;
+      else {
+        const m = l.match(/^(\t| {1,4})/);
+        n = m ? l.slice(m[0].length) : l;
+      }
+      const d = n.length - l.length;
+      if (i === 0) da = Math.max(d, ls - s.a);
+      db += d;
+      return n;
+    }).join("\n");
+    if (next === t.slice(ls, le)) return;
+    const a = Math.max(ls, s.a + da), b = Math.max(a, s.b + db);
+    edit(ls, le - ls, next, a, b);
+  }
+
   // A click in normal mode moves the block cursor there.
   ta.addEventListener("mouseup", () => {
     if (!vimOn || mode !== "markdown" || vim.mode === "insert") return;

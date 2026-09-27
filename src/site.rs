@@ -329,6 +329,7 @@ impl Site {
             ["dash"] => self.dash(r, out),
             ["dash", blog] => self.dash_blog(r, blog, "", out),
             ["edit", id] => self.edit(r, id, out),
+            ["edit", id, "preview"] => self.preview(r, id, out),
             ["comments", id] => self.more(r, id, out),
             ["live", id] => self.live(r, id, out),
             ["reply", id] => self.reply(r, id, out),
@@ -529,6 +530,7 @@ impl Site {
             published: m.published,
             can_edit,
             just_published: can_edit && m.published && r.query == "published=1",
+            preview: false,
         };
         let s = r.signed_in();
         if !m.published {
@@ -1048,6 +1050,44 @@ impl Site {
         let body = if big { "" } else { text.as_str() };
         let v = pages::EditView { id, rep: rep as u32, title: &title, slug: &slug, published, blog_slug: &blog_slug, body, big };
         self.html(r, out, 200, |h| pages::edit(h, &v));
+        Ok(())
+    }
+
+    /// The post as it would publish: the document's text now, rendered, for
+    /// its authors (THE POLICY: EditPost).
+    fn preview(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
+        if !self.signed(r, out) {
+            return Ok(());
+        }
+        let id = Site::post_id(id)?;
+        self.permit(r, 0, id, Action::EditPost { post: id })?;
+        let mut info = None;
+        self.st
+            .q(Q::PreviewInfo, &[Val::Int(id as i64)], |row| {
+                info = Some((row.text(0).to_string(), row.text(1).to_string(), row.text(2).to_string(), row.text(3).to_string(), row.text(4).to_string(), row.int(5)))
+            })
+            .map_err(db_code)?;
+        let (saved_title, blog_slug, blog_title, author, handle, published_ms) = info.ok_or(404u16)?;
+        // The title as the editor has it now (not saved yet), if it sent one.
+        let title = Form::parse(r.query.as_bytes()).and_then(|q| q.text("title", 200, false)).unwrap_or(saved_title);
+        let md = self.docs.get(&mut self.st, id).map_err(no_code)?.text();
+        let body = crate::markdown::render(md.as_bytes());
+        let v = pages::PostView {
+            id,
+            blog_slug: &blog_slug,
+            blog_title: &blog_title,
+            title: &title,
+            author: &author,
+            handle: &handle,
+            published_ms: if published_ms > 0 { published_ms } else { r.now() as i64 },
+            words: crate::markdown::words(md.as_bytes()) as i64,
+            published: false,
+            can_edit: true,
+            just_published: false,
+            preview: true,
+        };
+        let s = r.signed_in();
+        self.html(r, out, 200, |h| pages::post(h, s, &v, &body, None));
         Ok(())
     }
 

@@ -157,6 +157,26 @@ function start(ta) {
     }
   }
 
+  // PREVIEW: the post as it will publish, in a tab of its own. The tab is
+  // opened at once (a browser allows a new tab only during the click),
+  // then pointed at the preview once unsent edits have reached the server;
+  // the title as typed goes with it.
+  const previewLink = document.getElementById("preview");
+  if (previewLink) {
+    previewLink.addEventListener("click", async (ev) => {
+      if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button !== 0) return;
+      ev.preventDefault();
+      const tab = window.open("", "preview");
+      for (let i = 0; i < 1000 && (busy || batches.length); i++) {
+        if (busy) await new Promise((r) => setTimeout(r, 50));
+        else if (!(await sync())) break;
+      }
+      const url = previewLink.getAttribute("href") + (title && title.value.trim() ? "?title=" + encodeURIComponent(title.value.trim()) : "");
+      if (tab) tab.location.href = url;
+      else location.href = url;
+    });
+  }
+
   // Unsent text, or a title not saved yet: ask before leaving.
   window.addEventListener("beforeunload", (ev) => {
     if (leaving) return;
@@ -277,9 +297,9 @@ function start(ta) {
       const d = diff(view.text, next);
       change(d.p, d.del, d.ins, a, b);
     },
-    edit(p, del, ins) {
+    edit(p, del, ins, a = null, b = a) {
       if (view.readOnly || (del === 0 && ins === "")) return;
-      change(p, del, ins);
+      change(p, del, ins, a, b);
     },
     save() {
       if (form) form.requestSubmit();

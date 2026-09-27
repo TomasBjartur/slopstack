@@ -236,6 +236,9 @@ pub struct PostView<'a> {
     pub published: bool,
     pub can_edit: bool,
     pub just_published: bool,
+    /// A preview (the editor's text, as it would publish): said so, with
+    /// the way back.
+    pub preview: bool,
 }
 
 /// A published post's likes and comments: (likes, liked by the viewer,
@@ -258,10 +261,14 @@ pub fn post(h: &mut H, signed_in: bool, v: &PostView, body: &Markup, social_: Op
     date(h, v.published_ms);
     h.r("<span class=\"dot\"></span>");
     minutes(h, v.words);
-    if !v.published {
+    if v.preview {
+        h.r("<span class=\"dot\"></span><span class=\"badge\">Preview: as it will look when published</span>");
+    } else if !v.published {
         h.r("<span class=\"dot\"></span><span class=\"badge\">Draft: only authors can see this</span>");
     }
-    if v.can_edit {
+    if v.preview {
+        h.r("<span class=\"actions\"><a class=\"btn\" href=\"/edit/").n(v.id).r("\">Back to editing</a></span>");
+    } else if v.can_edit {
         h.r("<span class=\"actions\"><a class=\"btn\" href=\"/edit/").n(v.id).r("\">Edit</a></span>");
     }
     h.r("</div></header><div class=\"body\">").m(body).r("</div>");
@@ -431,6 +438,10 @@ pub fn edit(h: &mut H, v: &EditView) {
     h.wasm = true;
     head(h, &format!("Editing: {}", v.title));
     h.r("<header class=\"editor-bar\"><div class=\"wrap wide\"><a class=\"btn quiet\" href=\"/dash/").t(v.blog_slug).r("\" aria-label=\"Back to the blog\">←</a><span id=\"sync-status\" class=\"status\" role=\"status\">Saved</span>");
+    // Preview: the text as it will publish (for a published post, with the
+    // changes not yet published), in a tab of its own (web/editor.js sends
+    // unsent edits first).
+    h.r("<a class=\"btn quiet\" id=\"preview\" href=\"/edit/").n(v.id).r("/preview\" target=\"preview\">Preview</a>");
     if v.published {
         h.r("<a class=\"btn quiet view\" href=\"/b/").t(v.blog_slug).r("/").t(v.slug).r("\">View</a><form method=\"post\" action=\"/edit/").n(v.id).r("/unpublish\" data-confirm=\"Take this post down? Readers will no longer see it.\" data-ok=\"Unpublish\"><button class=\"quiet\">Unpublish</button></form><button form=\"post-form\" name=\"action\" value=\"publish\" class=\"primary\">Update</button>");
     } else {
