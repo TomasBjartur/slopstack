@@ -12,6 +12,9 @@ pub mod authz;
 #[path = "../spec/markup.rs"]
 pub mod spec_markup;
 pub mod html;
+#[path = "../spec/webauthn.rs"]
+pub mod spec_webauthn;
+pub mod webauthn;
 pub mod markdown;
 pub mod md_tables;
 pub mod json;
@@ -21,9 +24,14 @@ pub mod sys {
     pub mod crypto;
 }
 pub mod db;
+pub mod resp;
+pub mod form;
 pub mod io;
 pub mod server;
 pub mod app;
+pub mod assets;
+pub mod pages;
+pub mod site;
 pub mod sim;
 pub mod tests {
     pub mod crypto;
@@ -77,7 +85,10 @@ fn run() {
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8190);
     let io = io::LinuxIo::new(port).unwrap_or_else(|e| panic!("cannot listen on {port}: errno {e}"));
     eprintln!("listening on 127.0.0.1:{port}");
-    let mut s = server::Server::new(io, app::Site);
+    let path = std::env::var("BLOG_DB").unwrap_or_else(|_| "blog.db".into());
+    let st = db::Store::open(&path).unwrap_or_else(|e| panic!("cannot open {path}: {e:?}"));
+    let site = site::Site::new(st, site::Conf::from_env(port));
+    let mut s = server::Server::new(io, site);
     loop {
         s.turn(1000);
     }

@@ -41,10 +41,17 @@ impl<'a> Request<'a> {
     }
 }
 
+/// What the application may use besides the request: the time, and
+/// randomness (both from Io, so the simulator drives them from its seed).
+pub struct Ctx<'a> {
+    pub now_ms: u64,
+    pub random: &'a mut dyn FnMut(&mut [u8]),
+}
+
 /// What the server asks of the application: a whole response in out.
 /// Answers whether the connection may stay open.
 pub trait App {
-    fn handle(&mut self, req: &Request, now_ms: u64, out: &mut Vec<u8>) -> bool;
+    fn handle(&mut self, req: &Request, cx: &mut Ctx, out: &mut Vec<u8>) -> bool;
 }
 
 #[derive(Clone, Copy)]
@@ -520,7 +527,10 @@ impl<I: Io, A: App> Server<I, A> {
                 let req = Request { head, method: &head[..method_end], target: &head[method_end + 1..target_end], headers: &self.hs, body: &buf[used..total] };
                 let wants_close = req.header(b"connection").map_or(false, |v| v.eq_ignore_ascii_case(b"close"));
                 self.resp.clear();
-                self.app.handle(&req, now, &mut self.resp) && !wants_close
+                let io = &mut self.io;
+                let mut random = |b: &mut [u8]| io.random(b);
+                let mut cx = Ctx { now_ms: now, random: &mut random };
+                self.app.handle(&req, &mut cx, &mut self.resp) && !wants_close
             };
             // The rest of the input (pipelined requests) to the front.
             let rest = len - total;

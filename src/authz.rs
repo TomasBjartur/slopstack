@@ -161,6 +161,14 @@ pub fn csrf(site: Option<&[u8]>) -> (r: bool)
     }
 }
 
+/// The write budget law: may who, having made spent writes this minute,
+/// make another?
+pub fn budget_ok(spent: u64) -> (r: bool)
+    ensures r == within_budget(spent),
+{
+    spent < WRITES_PER_MINUTE
+}
+
 // SANITY THEOREMS about the policy.
 
 /// Nobody signed in may do anything but read a published post.

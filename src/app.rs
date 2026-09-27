@@ -1,12 +1,12 @@
 // The application (for now: the spike's pages). GET /echo/<x> answers <x>
 // (tests check order with it); GET / a small page; HEAD as GET without
 // the body.
-use crate::server::{error, App, Request};
+use crate::server::{error, App, Ctx, Request};
 
 pub struct Site;
 
 impl App for Site {
-    fn handle(&mut self, req: &Request, _now_ms: u64, out: &mut Vec<u8>) -> bool {
+    fn handle(&mut self, req: &Request, _cx: &mut Ctx, out: &mut Vec<u8>) -> bool {
         let head = req.method == b"HEAD";
         if req.method == b"POST" {
             // (Tests: the body back.)

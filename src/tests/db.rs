@@ -22,10 +22,14 @@ pub fn run() {
         let v = d.prepare("PRAGMA user_version").unwrap();
         check("…and are recorded", d.one_int(v, &[]).unwrap() == Some(db::MIGRATIONS.len() as i64));
         check("…and apply only once", db::migrate(&mut d).is_ok());
-        let ins = d.prepare("INSERT INTO user(email, name, created_ms) VALUES (?1, ?2, ?3)").unwrap();
+        let ins = d.prepare("INSERT INTO user(email, name, handle, created_ms) VALUES (?1, ?2, 'u' || lower(hex(randomblob(4))), ?3)").unwrap();
         check("an insert", d.run(ins, &[Val::Text(b"a@example.com"), Val::Text(b"A"), Val::Int(1)]) == Ok(1));
         check("a unique email: a second is a conflict", d.run(ins, &[Val::Text(b"a@example.com"), Val::Text(b"B"), Val::Int(1)]) == Err(DbErr::Conflict));
         check("a check: an empty name is a conflict", d.run(ins, &[Val::Text(b"b@example.com"), Val::Text(b""), Val::Int(1)]) == Err(DbErr::Conflict));
+        let h = d.prepare("INSERT INTO user(email, name, handle, created_ms) VALUES ('h@x.io', 'H', ?1, 1)").unwrap();
+        for bad in [&b"Ann"[..], b"1ann", b"an", b"ann-b", b"ann\xc3\xa9", b""] {
+            check(&format!("a bad handle {:?} is refused", String::from_utf8_lossy(bad)), d.run(h, &[Val::Text(bad)]) == Err(DbErr::Conflict));
+        }
         let blog = d.prepare("INSERT INTO blog(slug, title, created_ms) VALUES (?1, ?2, 1)").unwrap();
         check("a slug with capitals is refused", d.run(blog, &[Val::Text(b"Bad"), Val::Text(b"T")]) == Err(DbErr::Conflict));
         let fk = d.prepare("INSERT INTO member(blog_id, user_id, role) VALUES (?1, ?2, 1)").unwrap();
@@ -50,7 +54,7 @@ pub fn run() {
         check("…and the connection still works", d.run(put, &[Val::Null, Val::Text(b"after")]).is_ok());
     }
     let mut ro = Db::open(p, false).unwrap();
-    let w = ro.prepare("INSERT INTO user(email, name, created_ms) VALUES ('r@x', 'R', 1)");
+    let w = ro.prepare("INSERT INTO user(email, name, handle, created_ms) VALUES ('r@x', 'R', 'rrr', 1)");
     let refused = match w {
         Ok(id) => ro.run(id, &[]).is_err(),
         Err(_) => true,

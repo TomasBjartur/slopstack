@@ -1,8 +1,11 @@
 // JSON (RFC 8259), strict and bounded: for passkey data (clientDataJSON)
 // and tests. Nesting at most DEPTH; strings must be valid UTF-8 with valid
 // escapes (a lone surrogate is refused); numbers as f64; nothing after the
-// value but whitespace.
+// value but whitespace; a key repeated in an object is refused (which one
+// counts is not agreed on: a parser in front could see the other), and an
+// object has at most KEYS keys (the repeat check is linear per key).
 const DEPTH: u32 = 32;
+const KEYS: usize = 256;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Json {
@@ -106,6 +109,9 @@ impl<'a> P<'a> {
                     let k = self.string()?;
                     self.ws();
                     if !self.eat(b':') {
+                        return None;
+                    }
+                    if v.len() == KEYS || v.iter().any(|(x, _)| *x == k) {
                         return None;
                     }
                     v.push((k, self.value(depth + 1)?));
