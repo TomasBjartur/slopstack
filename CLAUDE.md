@@ -65,3 +65,11 @@ CPU throttled. Sizes nobody tested are where the first version broke.
 - `tests/bench.py` (optional, ~10 min): against the first version, its
   Next.js baseline and a real Substack post; writes `docs/bench.json`.
 - Deploying: `deploy/README.md` (ask first: it replaces the live site).
+
+## Status
+
+- Deployed at https://slopstack.tomasbjartur.com (2026-09-27), replacing
+  the first version; its data converted with `tools/import_old.py`
+  (nothing left behind). The first version's database is kept in
+  `~/bent-data` (final copy in `~/bent-data/backups/final-*.db`); going
+  back: `deploy/README.md`.
