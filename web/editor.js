@@ -232,7 +232,8 @@ function start(ta) {
   // A change made here other than by the textarea (Vim, Visual mode,
   // undo): into the view, the CRDT and the history; then the selection
   // [a, b] (null: where the view keeps it).
-  function change(p, del, ins, a = null, b = a) {
+  // typing: typed (merged with the typing before it into one undo step).
+  function change(p, del, ins, a = null, b = a, typing = false) {
     if (view.readOnly || (del === 0 && ins === "")) return;
     const s = view.sel();
     const delText = view.text.slice(p, p + del);
@@ -240,7 +241,7 @@ function start(ta) {
     local(p, del, ins);
     if (a !== null) view.select(a, b, true);
     const s2 = view.sel();
-    history.record(p, delText, ins, { a: s.a, b: s.b }, { a: s2.a, b: s2.b }, null);
+    history.record(p, delText, ins, { a: s.a, b: s.b }, { a: s2.a, b: s2.b }, typing ? Date.now() : null);
   }
 
   // The operations for a local change (a long insert in pieces, each
@@ -297,9 +298,9 @@ function start(ta) {
       const d = diff(view.text, next);
       change(d.p, d.del, d.ins, a, b);
     },
-    edit(p, del, ins, a = null, b = a) {
+    edit(p, del, ins, a = null, b = a, typing = false) {
       if (view.readOnly || (del === 0 && ins === "")) return;
-      change(p, del, ins, a, b);
+      change(p, del, ins, a, b, typing);
     },
     save() {
       if (form) form.requestSubmit();
@@ -387,8 +388,9 @@ function start(ta) {
     }
   }
 
-  // Into the Markdown text, at the caret.
+  // Into the Markdown text, at the caret (in Visual mode, at its caret).
   async function upload(file) {
+    if (modes.visual()) return modes.images([file]);
     const path = await uploadImage(file);
     if (!path || view.readOnly) return;
     const md = "\n![" + altOf(file.name) + "](" + path + ")\n";

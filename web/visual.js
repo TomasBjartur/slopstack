@@ -208,16 +208,36 @@ export class Visual {
       if (b) this.draw(b);
     });
     root.addEventListener("input", (ev) => {
-      if (!this.shortcut(ev)) this.commit();
+      // (Typing and deleting are merged into one undo step, as in the
+      // Markdown text; formatting is a step of its own.)
+      if (!this.shortcut(ev)) this.commit(/^(insertText|insertCompositionText|deleteContent)/.test(ev.inputType || ""));
     });
+    // Pasting: formatting that Markdown has survives (bold, italic, links,
+    // headings, lists, quotes, code), safely: the pasted HTML is parsed
+    // into an inert document (nothing in it runs or loads), written as
+    // Markdown by serialize, and rendered by the proved renderer, so only
+    // allowed markup reaches the page. Images are the editor's (uploaded).
     root.addEventListener("paste", (ev) => {
-      const files = [...(ev.clipboardData ? ev.clipboardData.files : [])].filter((f) => f.type.startsWith("image/"));
+      const cd = ev.clipboardData;
+      const files = [...(cd ? cd.files : [])].filter((f) => f.type.startsWith("image/"));
       if (files.length) return; // images: the editor uploads them (see editor.js)
       ev.preventDefault();
-      const t = ev.clipboardData ? ev.clipboardData.getData("text/plain") : "";
+      const html = cd ? cd.getData("text/html") : "";
+      const t = cd ? cd.getData("text/plain") : "";
+      if (html) {
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        docsStyles(doc.body);
+        const md = serialize(doc.body);
+        const out = md ? render(md) : null;
+        if (out) {
+          // One paragraph: its content only (no new block around it).
+          const one = /^<p>([\s\S]*)<\/p>\n?$/.exec(out);
+          document.execCommand("insertHTML", false, one && !one[1].includes("<p>") ? one[1] : out);
+          return;
+        }
+      }
       if (t) document.execCommand("insertText", false, t);
-    });
-  }
+    });  }
 
   // The blocks mutations touched (and blocks added at the top level).
   collect(recs) {
@@ -364,11 +384,21 @@ export class Visual {
     const k = m[1];
     if (k === "###") document.execCommand("formatBlock", false, "h3");
     else if (k[0] === "#") document.execCommand("formatBlock", false, "h2");
-    else if (k === ">") document.execCommand("formatBlock", false, "blockquote");
+    else if (k === ">") {
+      document.execCommand("formatBlock", false, "blockquote");
+      quoteParagraphs(this.root);
+    }
     else if (k[0] === "1") document.execCommand("insertOrderedList");
     else document.execCommand("insertUnorderedList");
     this.commit();
     return true;
+  }
+
+  // A change the mutation observer does not see (an attribute: a link's
+  // address): its block is written again at the next commit.
+  touch(node) {
+    const b = blockOf(this.root, node);
+    if (b) this.dirty.add(b);
   }
 
   // An edit: the touched blocks become Markdown again, and the change is
@@ -377,7 +407,7 @@ export class Visual {
   // strings), and only the stretch that differs is compared character by
   // character. A novel is tens of thousands of blocks; the whole text is
   // never built for an edit.
-  commit() {
+  commit(typing = false) {
     this.collect(this.observer.takeRecords());
     this.gather();
     this.observer.takeRecords();
@@ -388,7 +418,7 @@ export class Visual {
     this.dirty.clear();
     const prev = this.last, next = this.parts();
     this.last = next;
-    if (!prev) return this.onChange(next.join(""));
+    if (!prev) return this.onChange(next.join(""), typing);
     let a = 0;
     while (a < prev.length && a < next.length && prev[a] === next[a]) a++;
     if (a === prev.length && a === next.length) return;
@@ -398,7 +428,7 @@ export class Visual {
     for (let i = 0; i < a; i++) p += prev[i].length;
     const d = diff(prev.slice(a, prev.length - z).join(""), next.slice(a, next.length - z).join(""));
     if (d.del === 0 && d.ins === "") return;
-    this.onChange({ p: p + d.p, del: d.del, ins: d.ins });
+    this.onChange({ p: p + d.p, del: d.del, ins: d.ins }, typing);
   }
 
   // Content typed straight into the root (Safari does, once everything was
@@ -537,6 +567,56 @@ function listItems(list, indent, out) {
       listItems(c, indent + width, out);
     }
   }
+}
+
+// Pasted HTML made ready to write as Markdown. Formatting written as
+// styles (Google Docs, Word): a <b> or <strong>
+// that says it is not bold is unwrapped (Docs wraps a whole paste in one),
+// and spans with bold or italic styles become <b> and <i>.
+function docsStyles(root) {
+  // (What is not text on the page: scripts, style sheets and the like.)
+  for (const x of [...root.querySelectorAll("script, style, template, noscript, meta, link, title, svg, math, iframe, object")]) x.remove();
+  for (const b of [...root.querySelectorAll("b, strong")]) {
+    if (/font-weight:\s*(normal|[1-5]00)\b/.test(b.getAttribute("style") || "")) b.replaceWith(...b.childNodes);
+  }
+  for (const sp of [...root.querySelectorAll("span[style]")]) {
+    const st = sp.getAttribute("style");
+    let n = sp;
+    if (/font-style:\s*italic/.test(st)) {
+      const i = document.createElement("i");
+      i.append(...n.childNodes);
+      n.append(i);
+    }
+    if (/font-weight:\s*(bold|[6-9]00)\b/.test(st)) {
+      const b = document.createElement("b");
+      b.append(...n.childNodes);
+      n.append(b);
+    }
+  }
+}
+
+// Quotes hold paragraphs (the browser's quote command puts text straight
+// in the quote, and Enter then starts a second quote): each run of text
+// and inline elements in a quote is wrapped in a paragraph, the caret kept.
+export function quoteParagraphs(root) {
+  const sel = document.getSelection();
+  const keep = sel.rangeCount ? [sel.anchorNode, sel.anchorOffset, sel.focusNode, sel.focusOffset] : null;
+  for (const q of root.querySelectorAll("blockquote")) {
+    let run = null;
+    for (const n of [...q.childNodes]) {
+      const block = n.nodeType === 1 && /^(P|DIV|UL|OL|PRE|BLOCKQUOTE|H[1-6])$/.test(n.tagName);
+      if (block) {
+        run = null;
+        continue;
+      }
+      if (!run) {
+        run = document.createElement("p");
+        q.insertBefore(run, n);
+      }
+      run.appendChild(n);
+    }
+  }
+  if (keep) sel.setBaseAndExtent(keep[0], keep[1], keep[2], keep[3]);
 }
 
 function blockOf(root, n) {

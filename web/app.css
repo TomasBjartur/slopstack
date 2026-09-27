@@ -335,9 +335,16 @@ details.more .center { text-align: left; }
 @media (pointer: coarse) { .edit-tools .vim-toggle, .vim-line { display: none; } }
 .edit-tools .fmt { padding: 5px 9px; font-size: 0.85rem; border-color: transparent; background: transparent; }
 .edit-tools .fmt:hover { background: var(--code-bg); }
+.visual-mode .md-help { display: none; }
+/* The save status keeps at least its dot on a narrow screen. */
+.editor-bar .status { min-width: 1.2em; }
+@media (max-width: 600px) { .edit-tools .fmt-bar { flex-wrap: wrap; overflow: visible; } }
+.edit-tools .fmt[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+dialog.modal label input { display: block; width: 100%; margin-top: 6px; }
+dialog.modal .meta.bad { color: var(--danger); }
 .edit-tools .fmt[data-cmd="bold"] { font-weight: 800; }
 .edit-tools .fmt[data-cmd="italic"] { font-style: italic; font-family: var(--serif); }
-.edit-tools .fmt[data-cmd="code"] { font-family: var(--mono); }
+.edit-tools .fmt[data-cmd="code"], .edit-tools .fmt[data-cmd="pre"] { font-family: var(--mono); }
 .edit-tools .tools-end { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; }
 .vim-line { font: 0.8rem/1 var(--mono); color: var(--muted); white-space: pre; }
 .vim-line.insert { color: var(--accent); }
@@ -371,6 +378,9 @@ dialog.modal .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: 
   .write textarea.title { font-size: 1.8rem; }
   .hide-sm, .editor-bar .view { display: none !important; }
   .editor-bar .wrap { gap: 4px; }
+  /* Just the status's dot (its words are still read out: role=status). */
+  .editor-bar .status { font-size: 0; }
+  .editor-bar .btn, .editor-bar button { font-size: 0.9rem; }
   .editor-bar .btn, .editor-bar button { padding: 8px 12px; }
   .top nav { gap: 2px; }
   .top nav a:not(.btn), .top nav button.link { padding: 8px 6px; }

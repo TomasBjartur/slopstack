@@ -8,7 +8,7 @@
 // Built here, not in the page template: without JavaScript the editor is
 // a plain textarea and none of this applies.
 import { Vim } from "./vim.js";
-import { Visual, VISUAL_MAX } from "./visual.js";
+import { Visual, VISUAL_MAX, quoteParagraphs } from "./visual.js";
 
 const PREF_MODE = "slop:editor-mode";
 const PREF_VIM = "slop:vim";
@@ -55,7 +55,7 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
   const fmt = el("div", { class: "fmt-bar", role: "toolbar", "aria-label": "Formatting", hidden: "" },
     B("B", "Bold (Ctrl+B)", "bold"), B("I", "Italic (Ctrl+I)", "italic"), B("</>", "Code", "code"), B("Link", "Link (Ctrl+K)", "link"),
     B("H2", "Heading", "h2"), B("H3", "Subheading", "h3"), B("¶", "Paragraph", "p"), B("❝", "Quote", "quote"),
-    B("• List", "Bulleted list", "ul"), B("1. List", "Numbered list", "ol"));
+    B("• List", "Bulleted list", "ul"), B("1. List", "Numbered list", "ol"), B("{ }", "Code block", "pre"), B("Image", "Add an image", "image"));
   const vimBtn = el("button", { type: "button", class: "seg vim-toggle", "aria-pressed": "false", title: "Vim keybindings", text: "Vim" });
   const modeLine = el("span", { class: "vim-line", role: "status", "aria-live": "polite", hidden: "" });
   // Into the page's empty toolbar (its height is kept for it: no shift).
@@ -72,17 +72,29 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
   document.body.appendChild(dialog);
 
   // Visual mode reports a change ({p, del, ins}) or, rarely, the whole text.
-  const visual = new Visual(wys, (ch) => (typeof ch === "string" ? set(ch) : edit(ch.p, ch.del, ch.ins)));
+  const visual = new Visual(wys, (ch, typing) => (typeof ch === "string" ? set(ch) : edit(ch.p, ch.del, ch.ins, null, null, typing)));
   let mode = "markdown";
 
   // MODES
+  // Visual mode needs the document and the renderer (WebAssembly): asked
+  // for before they arrive (the saved preference, or a click while
+  // loading), it opens when they have.
+  let visualWanted = false;
   function toMode(m, focus = true) {
+    if (m === "visual" && view.readOnly) {
+      visualWanted = true;
+      vis.setAttribute("aria-pressed", "true");
+      md.setAttribute("aria-pressed", "false");
+      return;
+    }
+    if (m === "markdown") visualWanted = false;
     if (m === "visual" && view.length > VISUAL_MAX) {
       show("This post is too long for Visual mode: edit it as Markdown", "off");
       m = "markdown";
     }
     if (m === mode) return;
     mode = m;
+    document.body.classList.toggle("visual-mode", m === "visual");
     setPref(PREF_MODE, m);
     md.setAttribute("aria-pressed", String(m === "markdown"));
     vis.setAttribute("aria-pressed", String(m === "visual"));
@@ -105,23 +117,143 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
   md.addEventListener("click", () => toMode("markdown"));
   vis.addEventListener("click", () => toMode("visual"));
 
-  // FORMATTING (Visual mode)
+  // FORMATTING (Visual mode). Each button turns its format on, or off
+  // where it already is (a heading back to a paragraph, a quote or code
+  // unwrapped); the toolbar shows which apply where the caret is.
+  // The element of tag (a list of tags) around the caret, inside the text.
+  function around(tags) {
+    const sel = document.getSelection();
+    let n = sel && sel.rangeCount ? sel.anchorNode : null;
+    for (; n && n !== wys; n = n.parentNode) if (n.nodeType === 1 && tags.includes(n.tagName)) return n;
+    return null;
+  }
+  // Replaces el with its children, keeping the caret or selection where it
+  // was (moving nodes out would otherwise collapse it), then commits.
+  function unwrap(el) {
+    const sel = document.getSelection();
+    const keep = sel.rangeCount ? [sel.anchorNode, sel.anchorOffset, sel.focusNode, sel.focusOffset] : null;
+    const parent = el.parentNode;
+    while (el.firstChild) parent.insertBefore(el.firstChild, el);
+    el.remove();
+    if (keep) sel.setBaseAndExtent(keep[0], keep[1], keep[2], keep[3]);
+    visual.commit();
+  }
   function format(cmd) {
     wys.focus();
     if (cmd === "bold" || cmd === "italic") document.execCommand(cmd);
-    else if (cmd === "h2" || cmd === "h3" || cmd === "p") document.execCommand("formatBlock", false, cmd);
-    else if (cmd === "quote") document.execCommand("formatBlock", false, "blockquote");
-    else if (cmd === "ul") document.execCommand("insertUnorderedList");
+    else if (cmd === "h2" || cmd === "h3") {
+      const h = around(["H1", "H2", "H3", "H4", "H5", "H6"]);
+      const same = h && (cmd === "h3" ? /^H[3-6]$/.test(h.tagName) : /^H[12]$/.test(h.tagName));
+      document.execCommand("formatBlock", false, same ? "p" : cmd);
+    } else if (cmd === "p") document.execCommand("formatBlock", false, "p");
+    else if (cmd === "pre") {
+      const pre = around(["PRE"]);
+      // (A rendered code block has <code> inside: taken out with the block,
+      // else the text would stay code, inline.)
+      if (pre) for (const c of [...pre.querySelectorAll("code")]) c.replaceWith(...c.childNodes);
+      document.execCommand("formatBlock", false, pre ? "p" : "pre");
+    }
+    else if (cmd === "quote") {
+      const q = around(["BLOCKQUOTE"]);
+      if (q) unwrap(q);
+      else {
+        document.execCommand("formatBlock", false, "blockquote");
+        quoteParagraphs(wys);
+        visual.commit();
+      }
+    } else if (cmd === "ul") document.execCommand("insertUnorderedList");
     else if (cmd === "ol") document.execCommand("insertOrderedList");
     else if (cmd === "code") {
-      const s = document.getSelection().toString().replace(/\n/g, " ");
-      if (s) document.execCommand("insertHTML", false, "<code>" + escHtml(s) + "</code>");
-    } else if (cmd === "link") {
-      const url = prompt("Link to (https://…)", "https://");
-      if (url && /^(https?:\/\/|\/)[^\s()<>"]+$/.test(url)) document.execCommand("createLink", false, url);
-      else if (url && url !== "https://") show("A link must start with https:// or http://", "off");
+      const c = around(["CODE"]);
+      if (c && c.parentNode.tagName !== "PRE") unwrap(c);
+      else {
+        const s = document.getSelection().toString().replace(/\n/g, " ");
+        if (s) document.execCommand("insertHTML", false, "<code>" + escHtml(s) + "</code>");
+      }
+    } else if (cmd === "link") linkDialog();
+    else if (cmd === "image") imgPick.click();
+    state();
+  }
+
+  // Which formats apply at the caret: shown as pressed buttons.
+  function state() {
+    if (mode !== "visual") return;
+    const on = {
+      bold: !!around(["B", "STRONG"]) || (!around(["H1", "H2", "H3", "H4", "H5", "H6"]) && document.queryCommandState("bold")),
+      italic: !!around(["I", "EM"]),
+      code: !!around(["CODE"]),
+      link: !!around(["A"]),
+      h2: !!around(["H1", "H2"]),
+      h3: !!around(["H3", "H4", "H5", "H6"]),
+      quote: !!around(["BLOCKQUOTE"]),
+      pre: !!around(["PRE"]),
+      ul: (around(["UL", "OL"]) || {}).tagName === "UL",
+      ol: (around(["UL", "OL"]) || {}).tagName === "OL",
+    };
+    for (const b of fmt.querySelectorAll("button[data-cmd]")) {
+      if (b.dataset.cmd in on) b.setAttribute("aria-pressed", String(on[b.dataset.cmd]));
     }
   }
+  document.addEventListener("selectionchange", () => {
+    if (mode === "visual" && wys.contains(document.getSelection().anchorNode)) state();
+  });
+
+  // LINKS: a dialog (the page's, not the browser's prompt): add a link to
+  // the selected text (or the address as its text), change one, remove it.
+  const linkDlg = el("dialog", { class: "modal", "aria-labelledby": "link-title" });
+  const linkUrl = el("input", { type: "url", name: "url", required: "", placeholder: "https://…", autocomplete: "off", "aria-describedby": "link-note" });
+  const linkNote = el("p", { class: "meta", id: "link-note", text: "An address starting with https://, http:// or mailto:, or a page here starting with /." });
+  const linkRemove = el("button", { type: "button", class: "quiet", text: "Remove link" });
+  linkDlg.append(el("form", { method: "dialog", class: "stack" },
+    el("h2", { id: "link-title", text: "Link" }),
+    el("label", {}, "Link to ", linkUrl), linkNote,
+    el("div", { class: "row" }, linkRemove, el("button", { value: "cancel", class: "quiet", formnovalidate: "", text: "Cancel" }), el("button", { value: "ok", class: "primary", text: "Save link" }))));
+  let linkRange = null, linkEl = null;
+  const LINK_OK = /^(https?:\/\/[^\s<>"]+|mailto:[^\s<>"]+|\/[^\s<>"]*)$/;
+  function linkDialog() {
+    const sel = document.getSelection();
+    if (!sel.rangeCount || !wys.contains(sel.anchorNode)) return;
+    linkRange = sel.getRangeAt(0).cloneRange();
+    linkEl = around(["A"]);
+    linkUrl.value = linkEl ? linkEl.getAttribute("href") : "https://";
+    linkRemove.hidden = !linkEl;
+    linkNote.classList.remove("bad");
+    if (!linkDlg.isConnected) document.body.appendChild(linkDlg);
+    linkDlg.showModal();
+    linkUrl.select();
+  }
+  linkDlg.addEventListener("submit", (ev) => {
+    if (ev.submitter && ev.submitter.value !== "ok") return;
+    const url = linkUrl.value.trim();
+    if (!LINK_OK.test(url)) {
+      ev.preventDefault();
+      linkNote.classList.add("bad");
+      linkUrl.focus();
+    }
+  });
+  linkDlg.addEventListener("close", () => {
+    wys.focus();
+    const sel = document.getSelection();
+    if (linkRange) {
+      sel.removeAllRanges();
+      sel.addRange(linkRange);
+    }
+    if (linkDlg.returnValue !== "ok") return state();
+    const url = linkUrl.value.trim();
+    if (linkEl) {
+      linkEl.setAttribute("href", url);
+      visual.touch(linkEl);
+      visual.commit();
+    } else if (sel.isCollapsed) document.execCommand("insertHTML", false, '<a href="' + escHtml(url) + '">' + escHtml(url) + "</a>");
+    else document.execCommand("createLink", false, url);
+    state();
+  });
+  linkRemove.addEventListener("click", () => {
+    const a = linkEl;
+    linkDlg.close("cancel");
+    if (a) unwrap(a);
+    state();
+  });
   fmt.addEventListener("click", (ev) => {
     const b = ev.target.closest("button[data-cmd]");
     if (b) format(b.dataset.cmd);
@@ -146,15 +278,95 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
   // Images into Visual mode: uploaded, then put in at the caret.
   async function addImages(files, ev) {
     if (!files.length) return;
-    ev.preventDefault();
+    if (ev) ev.preventDefault();
+    // Where the caret was: the upload takes a while, and the caret may move.
+    const sel = document.getSelection();
+    const at = sel.rangeCount && wys.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
     for (const f of files) {
       const path = await upload(f);
       if (path) {
         wys.focus();
+        if (at) {
+          sel.removeAllRanges();
+          sel.addRange(at);
+        }
         document.execCommand("insertHTML", false, '<img src="' + path + '" alt="' + escHtml(altOf(f.name)) + '">');
+        if (at) at.collapse(false);
       }
     }
   }
+  // The toolbar's Image button: a file picker of its own.
+  const imgPick = el("input", { type: "file", accept: "image/*", hidden: "", multiple: "" });
+  fmt.append(imgPick);
+  imgPick.addEventListener("change", () => {
+    addImages([...imgPick.files], null);
+    imgPick.value = "";
+  });
+  // ENTER AND BACKSPACE where the browser's own does the unexpected:
+  // - Enter on an empty line in a quote leaves the quote (as in a list);
+  // - Backspace at the very start of a list item, a quote's first
+  //   paragraph or a heading first takes that formatting away (the
+  //   browser would join it to the block before).
+  function atStart(block) {
+    const sel = document.getSelection();
+    if (!sel.isCollapsed || !block.contains(sel.anchorNode)) return false;
+    const r = document.createRange();
+    r.setStart(block, 0);
+    r.setEnd(sel.anchorNode, sel.anchorOffset);
+    return r.toString() === "" && !r.cloneContents().querySelector("img");
+  }
+  wys.addEventListener("keydown", (ev) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.isComposing) return;
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      const q = around(["BLOCKQUOTE"]);
+      const p = around(["P", "DIV"]);
+      if (q && p && q.contains(p) && p !== q && p.textContent === "" && !p.querySelector("img")) {
+        ev.preventDefault();
+        const out = document.createElement("p");
+        out.appendChild(document.createElement("br"));
+        q.after(out);
+        p.remove();
+        if (!q.textContent && !q.querySelector("img")) q.remove();
+        document.getSelection().collapse(out, 0);
+        visual.commit();
+        state();
+      }
+      return;
+    }
+    if (ev.key !== "Backspace" || ev.shiftKey) return;
+    const li = around(["LI"]);
+    if (li && atStart(li)) {
+      ev.preventDefault();
+      document.execCommand("outdent");
+      state();
+      return;
+    }
+    const q = around(["BLOCKQUOTE"]);
+    if (q) {
+      const first = q.firstElementChild || q;
+      if (atStart(first) && first.contains(document.getSelection().anchorNode)) {
+        ev.preventDefault();
+        if (first === q) unwrap(q);
+        else {
+          const sel = document.getSelection();
+          const keep = [sel.anchorNode, sel.anchorOffset];
+          q.before(first);
+          if (!q.firstChild || (!q.textContent && !q.querySelector("img"))) q.remove();
+          sel.collapse(keep[0], keep[1]);
+          visual.commit();
+        }
+        state();
+        return;
+      }
+    }
+    const h = around(["H1", "H2", "H3", "H4", "H5", "H6"]);
+    if (h && atStart(h)) {
+      ev.preventDefault();
+      document.execCommand("formatBlock", false, "p");
+      state();
+    }
+  });
+
   // Tab in Visual mode: inside a list, the item nests (Shift+Tab: back
   // out); elsewhere Tab moves on, as on any page.
   wys.addEventListener("keydown", (ev) => {
@@ -334,9 +546,14 @@ export function setupModes(view, { set, edit, save, undo, redo, upload, show }) 
     },
     // The document arrived: Visual mode shows it.
     loaded() {
-      if (mode === "visual") visual.refresh(view.text);
+      if (visualWanted && mode !== "visual") {
+        visualWanted = false;
+        toMode("visual", false);
+      } else if (mode === "visual") visual.refresh(view.text);
     },
     visual: () => mode === "visual",
+    // Images from elsewhere (the page's own button) go in at Visual mode's caret.
+    images: (files) => addImages(files, null),
     focus() {
       if (mode === "visual") wys.focus();
       else view.focus();
