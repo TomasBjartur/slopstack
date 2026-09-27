@@ -12,7 +12,7 @@
       "home": {
         "status": 200,
         "html": 6614,
-        "html_gz": 1161,
+        "html_gz": 1158,
         "js_files": 2,
         "js": 36633,
         "js_gz": 14668
@@ -20,15 +20,15 @@
       "blog": {
         "status": 200,
         "html": 5391,
-        "html_gz": 1034,
+        "html_gz": 1030,
         "js_files": 2,
         "js": 36633,
         "js_gz": 14668
       },
       "post": {
         "status": 200,
-        "html": 3653,
-        "html_gz": 1384,
+        "html": 4137,
+        "html_gz": 1603,
         "js_files": 2,
         "js": 36633,
         "js_gz": 14668
@@ -36,7 +36,7 @@
       "author": {
         "status": 200,
         "html": 6335,
-        "html_gz": 1055,
+        "html_gz": 1056,
         "js_files": 2,
         "js": 36633,
         "js_gz": 14668
@@ -44,73 +44,73 @@
     },
     "server": {
       "home": {
-        "req_s": 5170.0,
-        "p50_us": 5908,
-        "p99_us": 12416,
+        "req_s": 8456.0,
+        "p50_us": 4130,
+        "p99_us": 5289,
         "errors": 0
       },
       "blog": {
-        "req_s": 4572.0,
-        "p50_us": 6686,
-        "p99_us": 12050,
+        "req_s": 8352.0,
+        "p50_us": 4174,
+        "p99_us": 5457,
         "errors": 0
       },
       "post": {
-        "req_s": 8015.0,
-        "p50_us": 4107,
-        "p99_us": 8314,
+        "req_s": 5830.0,
+        "p50_us": 5356,
+        "p99_us": 6681,
         "errors": 0
       },
       "author": {
-        "req_s": 4849.0,
-        "p50_us": 6517,
-        "p99_us": 7550,
+        "req_s": 8557.0,
+        "p50_us": 4164,
+        "p99_us": 5089,
         "errors": 0
       }
     },
     "browser": {
       "home": {
-        "ttfb": 3.2,
-        "fcp": 196,
-        "lcp": 196,
-        "dcl": 179.4,
-        "load": 179.7,
-        "script_ms": 18.8,
-        "task_ms": 166.4
+        "ttfb": 3.8,
+        "fcp": 208,
+        "lcp": 208,
+        "dcl": 184,
+        "load": 184.1,
+        "script_ms": 19.0,
+        "task_ms": 172.0
       },
       "blog": {
-        "ttfb": 3.8,
+        "ttfb": 2.9,
         "fcp": 188,
         "lcp": 188,
-        "dcl": 107.2,
-        "load": 118.5,
-        "script_ms": 17.6,
-        "task_ms": 150.3
+        "dcl": 169.7,
+        "load": 169.7,
+        "script_ms": 20.2,
+        "task_ms": 159.8
       },
       "post": {
-        "ttfb": 3.7,
-        "fcp": 216,
-        "lcp": 216,
-        "dcl": 192.3,
-        "load": 192.3,
-        "script_ms": 14.8,
-        "task_ms": 179.1
+        "ttfb": 2.9,
+        "fcp": 192,
+        "lcp": 192,
+        "dcl": 167.2,
+        "load": 167.3,
+        "script_ms": 23.5,
+        "task_ms": 166.2
       },
       "author": {
-        "ttfb": 3.5,
-        "fcp": 196,
-        "lcp": 196,
-        "dcl": 174.7,
-        "load": 174.7,
-        "script_ms": 20.5,
-        "task_ms": 167.8
+        "ttfb": 2.8,
+        "fcp": 184,
+        "lcp": 184,
+        "dcl": 105.6,
+        "load": 120.8,
+        "script_ms": 20.4,
+        "task_ms": 150.8
       }
     },
     "cpu_us": {
-      "home": 225.0,
-      "blog": 235.0,
-      "post": 125.0,
-      "author": 230.0
+      "home": 110.0,
+      "blog": 105.0,
+      "post": 215.0,
+      "author": 110.0
     }
   },
   "bend": {
@@ -118,7 +118,7 @@
       "home": {
         "status": 200,
         "html": 17193,
-        "html_gz": 3404,
+        "html_gz": 3402,
         "js_files": 2,
         "js": 36633,
         "js_gz": 14668
@@ -126,7 +126,7 @@
       "blog": {
         "status": 200,
         "html": 15440,
-        "html_gz": 3252,
+        "html_gz": 3251,
         "js_files": 2,
         "js": 36633,
         "js_gz": 14668
@@ -142,7 +142,7 @@
       "author": {
         "status": 200,
         "html": 16876,
-        "html_gz": 3295,
+        "html_gz": 3293,
         "js_files": 2,
         "js": 36633,
         "js_gz": 14668
@@ -150,73 +150,73 @@
     },
     "server": {
       "home": {
-        "req_s": 7980.0,
-        "p50_us": 3998,
-        "p99_us": 8742,
+        "req_s": 8608.0,
+        "p50_us": 3934,
+        "p99_us": 5012,
         "errors": 0
       },
       "blog": {
-        "req_s": 8608.0,
-        "p50_us": 3973,
-        "p99_us": 5218,
+        "req_s": 8544.0,
+        "p50_us": 3986,
+        "p99_us": 5091,
         "errors": 0
       },
       "post": {
-        "req_s": 7735.0,
-        "p50_us": 3895,
-        "p99_us": 8464,
+        "req_s": 8185.0,
+        "p50_us": 3855,
+        "p99_us": 4954,
         "errors": 0
       },
       "author": {
-        "req_s": 8249.0,
-        "p50_us": 4034,
-        "p99_us": 7460,
+        "req_s": 8250.0,
+        "p50_us": 4069,
+        "p99_us": 5281,
         "errors": 0
       }
     },
     "browser": {
       "home": {
-        "ttfb": 4.4,
-        "fcp": 240,
-        "lcp": 240,
-        "dcl": 222.7,
-        "load": 222.9,
-        "script_ms": 32.8,
-        "task_ms": 221.4
+        "ttfb": 6.2,
+        "fcp": 224,
+        "lcp": 224,
+        "dcl": 209.7,
+        "load": 210.7,
+        "script_ms": 32.6,
+        "task_ms": 218.7
       },
       "blog": {
-        "ttfb": 4.1,
-        "fcp": 220,
-        "lcp": 220,
-        "dcl": 201.8,
-        "load": 201.9,
-        "script_ms": 31.3,
-        "task_ms": 202.2
+        "ttfb": 3.6,
+        "fcp": 232,
+        "lcp": 232,
+        "dcl": 205.4,
+        "load": 205.5,
+        "script_ms": 33.2,
+        "task_ms": 216.0
       },
       "post": {
-        "ttfb": 3.3,
-        "fcp": 212,
-        "lcp": 212,
-        "dcl": 109.5,
-        "load": 119,
-        "script_ms": 31.9,
-        "task_ms": 190.0
+        "ttfb": 4,
+        "fcp": 200,
+        "lcp": 200,
+        "dcl": 173.9,
+        "load": 174,
+        "script_ms": 31.6,
+        "task_ms": 182.4
       },
       "author": {
-        "ttfb": 3.4,
-        "fcp": 228,
-        "lcp": 228,
-        "dcl": 203.3,
-        "load": 206.1,
-        "script_ms": 30.5,
-        "task_ms": 209.8
+        "ttfb": 4.5,
+        "fcp": 224,
+        "lcp": 224,
+        "dcl": 188.8,
+        "load": 188.8,
+        "script_ms": 32.1,
+        "task_ms": 207.1
       }
     },
     "cpu_us": {
-      "home": 125.0,
+      "home": 140.0,
       "blog": 135.0,
       "post": 145.0,
-      "author": 135.0
+      "author": 140.0
     }
   },
   "next": {
@@ -256,111 +256,111 @@
     },
     "server": {
       "home": {
-        "req_s": 122.0,
-        "p50_us": 257341,
-        "p99_us": 332505,
+        "req_s": 118.0,
+        "p50_us": 267917,
+        "p99_us": 368458,
         "errors": 0
       },
       "blog": {
         "req_s": 148.0,
-        "p50_us": 219461,
-        "p99_us": 310071,
+        "p50_us": 216043,
+        "p99_us": 274379,
         "errors": 0
       },
       "post": {
-        "req_s": 236.0,
-        "p50_us": 124220,
-        "p99_us": 186224,
+        "req_s": 238.0,
+        "p50_us": 123458,
+        "p99_us": 182973,
         "errors": 0
       },
       "author": {
-        "req_s": 157.0,
-        "p50_us": 194538,
-        "p99_us": 322139,
+        "req_s": 153.0,
+        "p50_us": 213180,
+        "p99_us": 282247,
         "errors": 0
       }
     },
     "browser": {
       "home": {
-        "ttfb": 38.2,
+        "ttfb": 19.8,
         "fcp": 252,
         "lcp": 252,
-        "dcl": 230.8,
-        "load": 465,
-        "script_ms": 115.1,
-        "task_ms": 509.7
+        "dcl": 224.3,
+        "load": 445.2,
+        "script_ms": 116.7,
+        "task_ms": 503.1
       },
       "blog": {
-        "ttfb": 24.5,
-        "fcp": 244,
-        "lcp": 244,
-        "dcl": 227.4,
-        "load": 447.7,
-        "script_ms": 118.0,
-        "task_ms": 513.8
+        "ttfb": 37,
+        "fcp": 276,
+        "lcp": 276,
+        "dcl": 152.7,
+        "load": 462.6,
+        "script_ms": 120.9,
+        "task_ms": 515.8
       },
       "post": {
-        "ttfb": 20.8,
-        "fcp": 232,
-        "lcp": 232,
-        "dcl": 112.2,
-        "load": 447.1,
-        "script_ms": 107.1,
-        "task_ms": 478.5
+        "ttfb": 16.1,
+        "fcp": 224,
+        "lcp": 224,
+        "dcl": 119.9,
+        "load": 424,
+        "script_ms": 108.6,
+        "task_ms": 465.4
       },
       "author": {
-        "ttfb": 30.9,
-        "fcp": 280,
-        "lcp": 280,
-        "dcl": 146.3,
-        "load": 471.7,
-        "script_ms": 112.6,
-        "task_ms": 507.5
+        "ttfb": 20.2,
+        "fcp": 248,
+        "lcp": 248,
+        "dcl": 152,
+        "load": 466.4,
+        "script_ms": 118.4,
+        "task_ms": 527.0
       }
     }
   },
   "novel": {
     "weight": {
       "status": 200,
-      "html": 7446725,
-      "html_gz": 34312,
+      "html": 7447210,
+      "html_gz": 34586,
       "js_files": 2,
       "js": 36633,
       "js_gz": 14668
     },
     "server": {
-      "req_s": 249.0,
-      "p50_us": 122366,
-      "p99_us": 219297,
+      "req_s": 247.0,
+      "p50_us": 123609,
+      "p99_us": 298119,
       "errors": 0
     },
     "browser": {
-      "ttfb": 6.7,
-      "fcp": 368,
-      "lcp": 368,
-      "dcl": 13201.9,
-      "load": 13208.1,
-      "script_ms": 1746.5,
-      "task_ms": 14877.0
+      "ttfb": 5.7,
+      "fcp": 248,
+      "lcp": 248,
+      "dcl": 13364,
+      "load": 13371.3,
+      "script_ms": 1660.1,
+      "task_ms": 15066.0
     }
   },
   "substack": {
     "url": "https://on.substack.com/",
     "weight": {
-      "html": 118845,
-      "html_gz": 22801,
+      "html": 118829,
+      "html_gz": 22789,
       "js_files": 157,
-      "js": 6545850,
-      "js_gz": 2028591
+      "js": 6545834,
+      "js_gz": 2028579
     },
     "browser": {
-      "ttfb": 12,
-      "fcp": 1032,
-      "lcp": 1032,
-      "dcl": 2998.2,
-      "load": 6247.8,
-      "script_ms": 2377.9,
-      "task_ms": 6520.8
+      "ttfb": 17.3,
+      "fcp": 1376,
+      "lcp": 1376,
+      "dcl": 3184.8,
+      "load": 5986.2,
+      "script_ms": 2393.5,
+      "task_ms": 6630.0
     }
   }
 }

@@ -174,11 +174,14 @@ fn pager(h: &mut H, base: &str, page: u64, more: bool) {
     h.r("</nav>");
 }
 
-pub fn home(h: &mut H, signed_in: bool, rows: &[FeedItem], page: u64, more: bool) {
-    open(h, "Recent posts", signed_in, false);
-    if !signed_in {
-        h.r("<section class=\"masthead\"><h1>A quiet place to write</h1><p class=\"lede\">Fast pages, no trackers, no passwords: you sign in with a passkey. Write alone or with co-authors, even offline.</p><a class=\"btn primary big\" href=\"/signup\">Start writing</a></section>");
-    }
+// FEED PAGES: the main part (cached by the server: the same for every
+// visitor until the database's feed generation changes) and the page
+// around it (per visitor: the header, the masthead for the signed-out).
+pub fn masthead(h: &mut H) {
+    h.r("<section class=\"masthead\"><h1>A quiet place to write</h1><p class=\"lede\">Fast pages, no trackers, no passwords: you sign in with a passkey. Write alone or with co-authors, even offline.</p><a class=\"btn primary big\" href=\"/signup\">Start writing</a></section>");
+}
+
+pub fn home_main(h: &mut H, rows: &[FeedItem], page: u64, more: bool) {
     h.r("<div class=\"feed-head\"><h2>Recent posts</h2></div>");
     if rows.is_empty() {
         h.r("<div class=\"empty\"><p>Nothing published yet. Be the first!</p></div>");
@@ -186,11 +189,9 @@ pub fn home(h: &mut H, signed_in: bool, rows: &[FeedItem], page: u64, more: bool
         items(h, rows, true);
     }
     pager(h, "/", page, more);
-    close(h);
 }
 
-pub fn blog(h: &mut H, signed_in: bool, slug: &str, title: &str, owner: &str, owner_handle: &str, rows: &[FeedItem], page: u64, more: bool) {
-    open(h, title, signed_in, false);
+pub fn blog_main(h: &mut H, slug: &str, title: &str, owner: &str, owner_handle: &str, rows: &[FeedItem], page: u64, more: bool) {
     h.r("<header class=\"masthead\"><h1>").t(title).r("</h1><p class=\"muted\">by <a href=\"/u/").t(owner_handle).r("\">").t(owner).r("</a></p></header>");
     if rows.is_empty() {
         h.r("<div class=\"empty\"><p>No posts yet.</p></div>");
@@ -199,11 +200,9 @@ pub fn blog(h: &mut H, signed_in: bool, slug: &str, title: &str, owner: &str, ow
     }
     let base = format!("/b/{slug}");
     pager(h, &base, page, more);
-    close(h);
 }
 
-pub fn author(h: &mut H, signed_in: bool, handle: &str, name: &str, rows: &[FeedItem], page: u64, more: bool) {
-    open(h, name, signed_in, false);
+pub fn author_main(h: &mut H, handle: &str, name: &str, rows: &[FeedItem], page: u64, more: bool) {
     h.r("<header class=\"masthead\"><h1>").t(name).r("</h1><p class=\"muted\">@").t(handle).r("</p></header>");
     if rows.is_empty() {
         h.r("<div class=\"empty\"><p>Nothing published yet.</p></div>");
@@ -212,6 +211,16 @@ pub fn author(h: &mut H, signed_in: bool, handle: &str, name: &str, rows: &[Feed
     }
     let base = format!("/u/{handle}");
     pager(h, &base, page, more);
+}
+
+/// A feed page: the header for this visitor, then the (cached) main part.
+pub fn feed_page(h: &mut H, title: &str, signed_in: bool, masthead_: bool, main: &[u8]) {
+    open(h, title, signed_in, false);
+    if masthead_ && !signed_in {
+        masthead(h);
+    }
+    // (main was made by the functions above: template and escaped text.)
+    h.b.extend_from_slice(main);
     close(h);
 }
 
@@ -461,7 +470,7 @@ pub struct CommentView {
     pub deleted: bool,
     /// The viewer may delete it (its author, or a moderator).
     pub can_delete: bool,
-    pub body: Markup,
+    pub body: std::rc::Rc<Markup>,
 }
 
 /// Replies nest to this depth on screen (deeper ones join the last level).

@@ -22,6 +22,7 @@ extern "C" {
     fn sqlite3_prepare_v3(db: *mut sqlite3, sql: *const c_char, n: c_int, flags: u32, st: *mut *mut sqlite3_stmt, tail: *mut *const c_char) -> c_int;
     fn sqlite3_step(st: *mut sqlite3_stmt) -> c_int;
     fn sqlite3_reset(st: *mut sqlite3_stmt) -> c_int;
+    fn sqlite3_stmt_status(st: *mut sqlite3_stmt, op: c_int, reset: c_int) -> c_int;
     fn sqlite3_clear_bindings(st: *mut sqlite3_stmt) -> c_int;
     fn sqlite3_finalize(st: *mut sqlite3_stmt) -> c_int;
     fn sqlite3_bind_int64(st: *mut sqlite3_stmt, i: c_int, v: i64) -> c_int;
@@ -58,6 +59,10 @@ const PREPARE_PERSISTENT: u32 = 0x1;
 const DBCONFIG_DEFENSIVE: c_int = 1010;
 const DBCONFIG_TRUSTED_SCHEMA: c_int = 1017;
 const DBCONFIG_ENABLE_LOAD_EXTENSION: c_int = 1005;
+/// Query plans do not depend on bound values: without it, a bound LIMIT
+/// makes SQLite parse and plan the statement again on every binding
+/// (measured: half the time of a post page with comments).
+const DBCONFIG_ENABLE_QPSG: c_int = 1007;
 const TRANSIENT: isize = -1;
 
 /// A value to bind.
@@ -171,6 +176,7 @@ impl Db {
             sqlite3_db_config(raw, DBCONFIG_DEFENSIVE, 1 as c_int, std::ptr::null_mut::<c_int>());
             sqlite3_db_config(raw, DBCONFIG_TRUSTED_SCHEMA, 0 as c_int, std::ptr::null_mut::<c_int>());
             sqlite3_db_config(raw, DBCONFIG_ENABLE_LOAD_EXTENSION, 0 as c_int, std::ptr::null_mut::<c_int>());
+            sqlite3_db_config(raw, DBCONFIG_ENABLE_QPSG, 1 as c_int, std::ptr::null_mut::<c_int>());
             let arg = &*db.deadline as *const u64 as *mut c_void;
             sqlite3_progress_handler(raw, 1000, Some(progress), arg);
         }
@@ -282,6 +288,20 @@ impl Db {
     }
 
     /// Queries from now stop after ms (0: no limit).
+    /// How many times each statement was prepared again by SQLite (a
+    /// schema change, or a plan that depends on bound values): for
+    /// profiling (tools and tests), not for the server's logic.
+    pub fn reprepares(&self) -> Vec<(usize, i32)> {
+        const SQLITE_STMTSTATUS_REPREPARE: c_int = 5;
+        self.stmts
+            .iter()
+            .enumerate()
+            // SAFETY: each statement is valid until drop; status reads a counter.
+            .map(|(i, &st)| (i, unsafe { sqlite3_stmt_status(st, SQLITE_STMTSTATUS_REPREPARE, 0) }))
+            .filter(|&(_, n)| n > 0)
+            .collect()
+    }
+
     pub fn set_deadline(&mut self, ms: u64) {
         *self.deadline = if ms == 0 { 0 } else { crate::sys::linux::now_ms() + ms };
     }

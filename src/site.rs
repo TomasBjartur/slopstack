@@ -45,6 +45,9 @@ const TEXT_MAX: usize = 8 << 20;
 const THREADS_PAGE: i64 = 20;
 const REPLIES_MAX: i64 = 1000;
 const COMMENT_MAX: usize = 10_000;
+/// Rendered comments kept (a comment is at most 10,000 characters: at
+/// most ~2 GB in the worst case, ~100 MB for typical comments of 1 KB).
+const COMMENT_CACHE: usize = 100_000;
 /// An image (the editor resizes to fit): 2 MiB.
 const IMAGE_MAX: usize = 2 << 20;
 /// Editor page loads a user may make a minute (in each worker).
@@ -73,6 +76,29 @@ impl Conf {
         let origin = std::env::var("BLOG_ORIGIN").unwrap_or_else(|_| format!("http://localhost:{port}"));
         let rp_id = std::env::var("BLOG_RP_ID").unwrap_or_else(|_| "localhost".into());
         Conf::new(&origin, &rp_id, std::env::var("BLOG_SIGNUP_DIRECT").as_deref() == Ok("1"))
+    }
+}
+
+/// Feed pages' main parts by path and query, as of a feed generation.
+/// Bounded: past FEEDS_MAX entries or FEEDS_BYTES, emptied.
+struct FeedCache {
+    map: HashMap<String, (i64, String, Rc<Vec<u8>>)>,
+    bytes: usize,
+}
+
+const FEEDS_MAX: usize = 20_000;
+const FEEDS_BYTES: usize = 64 << 20;
+
+impl FeedCache {
+    fn put(&mut self, key: String, gen: i64, title: String, main: Rc<Vec<u8>>) {
+        if self.map.len() >= FEEDS_MAX || self.bytes + main.len() > FEEDS_BYTES {
+            self.map.clear();
+            self.bytes = 0;
+        }
+        self.bytes += main.len();
+        if let Some((_, _, old)) = self.map.insert(key, (gen, title, main)) {
+            self.bytes -= old.len();
+        }
     }
 }
 
@@ -112,6 +138,12 @@ impl PostCache {
 pub struct Site {
     pub st: Store,
     docs: crate::docs::Docs,
+    feeds: FeedCache,
+    /// BLOG_STMT_STATS=1: print statements SQLite prepared again (profiling).
+    stmt_stats: bool,
+    requests: u64,
+    /// Rendered comments by id (COMMENT_CACHE of them at most).
+    comments_md: HashMap<u64, Rc<Markup>>,
     conf: Conf,
     cache: PostCache,
     /// Editor page loads this minute, by user (OPENS_PER_MINUTE).
@@ -182,7 +214,7 @@ type Res = Result<(), u16>;
 
 impl Site {
     pub fn new(st: Store, conf: Conf) -> Site {
-        Site { st, docs: crate::docs::Docs::new(), conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, opens: HashMap::new(), minute: 0, challenges: 0, swept_ms: 0 }
+        Site { st, docs: crate::docs::Docs::new(), feeds: FeedCache { map: HashMap::new(), bytes: 0 }, stmt_stats: std::env::var("BLOG_STMT_STATS").as_deref() == Ok("1"), requests: 0, comments_md: HashMap::new(), conf, cache: PostCache { map: HashMap::new(), bytes: 0 }, opens: HashMap::new(), minute: 0, challenges: 0, swept_ms: 0 }
     }
 
     // RESPONSES
@@ -381,38 +413,62 @@ impl Site {
         Ok((rows, more))
     }
 
+    /// A feed page's main part: from the cache if the feed generation is
+    /// the one it was made at, else made (make answers the page's title and
+    /// fills the part; its errors, such as 404, are not cached).
+    fn feed_page(&mut self, r: &mut R, masthead: bool, out: &mut Vec<u8>, make: impl FnOnce(&mut Site, &mut H) -> Result<String, u16>) -> Res {
+        let gen = self.st.one(Q::Gen, &[]).map_err(db_code)?.unwrap_or(0);
+        let key = format!("{}?{}", r.path, r.query);
+        let (title, main) = match self.feeds.map.get(&key) {
+            Some((g, t, m)) if *g == gen => (t.clone(), m.clone()),
+            _ => {
+                let mut h = H::new(String::new());
+                let t = make(self, &mut h)?;
+                let m = Rc::new(h.b);
+                self.feeds.put(key, gen, t.clone(), m.clone());
+                (t, m)
+            }
+        };
+        let s = r.signed_in();
+        self.html(r, out, 200, |h| pages::feed_page(h, &title, s, masthead, &main));
+        Ok(())
+    }
+
     fn home(&mut self, r: &mut R, out: &mut Vec<u8>) -> Res {
         let page = r.page_no();
-        let (rows, more) = self.feed(Q::Recent, &[], page)?;
-        let s = r.signed_in();
-        self.html(r, out, 200, |h| pages::home(h, s, &rows, page, more));
-        Ok(())
+        self.feed_page(r, page == 1, out, |site, h| {
+            let (rows, more) = site.feed(Q::Recent, &[], page)?;
+            pages::home_main(h, &rows, page, more);
+            Ok("Recent posts".into())
+        })
     }
 
     fn blog(&mut self, r: &mut R, slug: &str, out: &mut Vec<u8>) -> Res {
-        let (id, title) = self.blog_id(slug)?;
         let page = r.page_no();
-        let (rows, more) = self.feed(Q::BlogPosts, &[Val::Int(id as i64)], page)?;
-        let mut owner = (String::new(), String::new());
-        self.st.q(Q::BlogOwner, &[Val::Int(id as i64)], |row| owner = (row.text(0).into(), row.text(1).into())).map_err(db_code)?;
-        let s = r.signed_in();
-        self.html(r, out, 200, |h| pages::blog(h, s, slug, &title, &owner.0, &owner.1, &rows, page, more));
-        Ok(())
+        self.feed_page(r, false, out, |site, h| {
+            let (id, title) = site.blog_id(slug)?;
+            let (rows, more) = site.feed(Q::BlogPosts, &[Val::Int(id as i64)], page)?;
+            let mut owner = (String::new(), String::new());
+            site.st.q(Q::BlogOwner, &[Val::Int(id as i64)], |row| owner = (row.text(0).into(), row.text(1).into())).map_err(db_code)?;
+            pages::blog_main(h, slug, &title, &owner.0, &owner.1, &rows, page, more);
+            Ok(title)
+        })
     }
 
     fn author(&mut self, r: &mut R, handle: &str, out: &mut Vec<u8>) -> Res {
-        let mut u = None;
-        self.st.q(Q::UserByHandle, &[Val::Text(handle.as_bytes())], |row| u = Some((row.int(0), row.text(1).to_string()))).map_err(db_code)?;
-        let (id, name) = u.ok_or(404u16)?;
         let page = r.page_no();
-        let (rows, more) = self.feed(Q::AuthorPosts, &[Val::Int(id)], page)?;
-        if rows.is_empty() && page == 1 {
-            // Only people who have published have a page.
-            return Err(404);
-        }
-        let s = r.signed_in();
-        self.html(r, out, 200, |h| pages::author(h, s, handle, &name, &rows, page, more));
-        Ok(())
+        self.feed_page(r, false, out, |site, h| {
+            let mut u = None;
+            site.st.q(Q::UserByHandle, &[Val::Text(handle.as_bytes())], |row| u = Some((row.int(0), row.text(1).to_string()))).map_err(db_code)?;
+            let (id, name) = u.ok_or(404u16)?;
+            let (rows, more) = site.feed(Q::AuthorPosts, &[Val::Int(id)], page)?;
+            if rows.is_empty() && page == 1 {
+                // Only people who have published have a page.
+                return Err(404);
+            }
+            pages::author_main(h, handle, &name, &rows, page, more);
+            Ok(name)
+        })
     }
 
     fn post_page(&mut self, r: &mut R, blog: &str, slug: &str, out: &mut Vec<u8>) -> Res {
@@ -481,8 +537,15 @@ impl Site {
         }
         let (likes, count) = self.social_counts(m.id)?;
         let liked = r.signed_in() && self.st.one(Q::Liked, &[Val::Int(m.id as i64), Val::Int(r.uid() as i64)]).map_err(db_code)?.is_some();
-        let (cs, more_after) = self.threads(m.id, 0, r.uid(), can_edit)?;
-        let last = self.st.one(Q::LastComment, &[Val::Int(m.id as i64)]).map_err(db_code)?.unwrap_or(0) as u64;
+        // (No comments, the common case: nothing more to ask. A deleted
+        // comment still counts as there, for its replies.)
+        let (cs, more_after, last) = if self.st.one(Q::AnyComment, &[Val::Int(m.id as i64)]).map_err(db_code)?.is_none() {
+            (Vec::new(), None, 0)
+        } else {
+            let (cs, more_after) = self.threads(m.id, 0, r.uid(), can_edit)?;
+            let last = self.st.one(Q::LastComment, &[Val::Int(m.id as i64)]).map_err(db_code)?.unwrap_or(0) as u64;
+            (cs, more_after, last)
+        };
         let sc = pages::Social { likes, liked, count, comments: &cs, more_after, last };
         self.html(r, out, 200, |h| pages::post(h, s, &v, &body, Some(&sc)));
         Ok(())
@@ -1134,6 +1197,7 @@ impl Site {
 
     fn comment_rows(&mut self, q: Q, args: &[Val], uid: u64, moderator: bool) -> Result<Vec<pages::CommentView>, u16> {
         let mut v = Vec::new();
+        let comments_md = &mut self.comments_md;
         self.st
             .q(q, args, |row| {
                 let author_id = row.int(7) as u64;
@@ -1145,7 +1209,22 @@ impl Site {
                     created_ms: row.int(5),
                     deleted: row.int(6) != 0,
                     can_delete: uid != 0 && (author_id == uid || moderator),
-                    body: crate::markdown::render(row.bytes(4)),
+                    // (A comment's text never changes: its rendering is
+                    // cached by id; a deleted one shows none.)
+                    body: {
+                        let id = row.int(0) as u64;
+                        match comments_md.get(&id) {
+                            Some(m) => Rc::clone(m),
+                            None => {
+                                let m = Rc::new(crate::markdown::render(row.bytes(4)));
+                                if comments_md.len() >= COMMENT_CACHE {
+                                    comments_md.clear();
+                                }
+                                comments_md.insert(id, Rc::clone(&m));
+                                m
+                            }
+                        }
+                    },
                 })
             })
             .map_err(db_code)?;
@@ -1468,6 +1547,12 @@ impl App for Site {
     fn handle(&mut self, req: &Request, cx: &mut Ctx, out: &mut Vec<u8>) -> bool {
         let now = cx.now_ms;
         self.sweep(now);
+        if self.stmt_stats {
+            self.requests += 1;
+            if self.requests % 5000 == 0 {
+                eprintln!("reprepares after {} requests: {:?}", self.requests, self.st.db.reprepares());
+            }
+        }
         let target = std::str::from_utf8(req.target).unwrap_or("");
         let (path, query) = match target.find('?') {
             Some(i) => (&target[..i], &target[i + 1..]),

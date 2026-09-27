@@ -156,6 +156,20 @@ pub const MIGRATIONS: &[&str] = &[
        bytes BLOB NOT NULL CHECK (length(bytes) BETWEEN 1 AND 2097152),
        created_ms INTEGER NOT NULL
      ) STRICT;
+     -- The feed generation: changed (by these triggers, so no code path
+     -- can forget) by anything a feed page shows. Feed pages are cached by
+     -- it, in every worker process.
+     CREATE TABLE gen (id INTEGER PRIMARY KEY CHECK (id = 1), n INTEGER NOT NULL);
+     INSERT INTO gen VALUES (1, 0);
+     CREATE TRIGGER gen_post_ins AFTER INSERT ON post WHEN NEW.published = 1 BEGIN UPDATE gen SET n = n + 1; END;
+     CREATE TRIGGER gen_post_upd AFTER UPDATE OF published, published_ms, title, slug, words, author_id, blog_id ON post
+       WHEN OLD.published = 1 OR NEW.published = 1 BEGIN UPDATE gen SET n = n + 1; END;
+     CREATE TRIGGER gen_post_del AFTER DELETE ON post WHEN OLD.published = 1 BEGIN UPDATE gen SET n = n + 1; END;
+     CREATE TRIGGER gen_blog_upd AFTER UPDATE ON blog BEGIN UPDATE gen SET n = n + 1; END;
+     CREATE TRIGGER gen_blog_del AFTER DELETE ON blog BEGIN UPDATE gen SET n = n + 1; END;
+     CREATE TRIGGER gen_user_upd AFTER UPDATE OF name, handle ON user BEGIN UPDATE gen SET n = n + 1; END;
+     CREATE TRIGGER gen_member_ins AFTER INSERT ON member BEGIN UPDATE gen SET n = n + 1; END;
+     CREATE TRIGGER gen_member_del AFTER DELETE ON member BEGIN UPDATE gen SET n = n + 1; END;
      -- Writes per user per minute (spec/authz.rs WRITES_PER_MINUTE).
      CREATE TABLE write_budget (
        user_id INTEGER PRIMARY KEY REFERENCES user(id) ON DELETE CASCADE,
@@ -267,6 +281,7 @@ queries! {
     Threads => "SELECT c.id, coalesce(c.parent_id, 0), coalesce(u.name, ''), coalesce(u.handle, ''), c.body_md, c.created_ms, c.deleted, coalesce(c.author_id, 0) FROM comment c LEFT JOIN user u ON u.id = c.author_id WHERE c.post_id = ?1 AND c.parent_id IS NULL AND c.id > ?2 ORDER BY c.id LIMIT ?3",
     Replies => "SELECT c.id, coalesce(c.parent_id, 0), coalesce(u.name, ''), coalesce(u.handle, ''), c.body_md, c.created_ms, c.deleted, coalesce(c.author_id, 0) FROM comment c LEFT JOIN user u ON u.id = c.author_id WHERE c.post_id = ?1 AND c.root_id BETWEEN ?2 AND ?3 ORDER BY c.id LIMIT ?4",
     CommentsAfter => "SELECT c.id, coalesce(c.parent_id, 0), coalesce(u.name, ''), coalesce(u.handle, ''), c.body_md, c.created_ms, c.deleted, coalesce(c.author_id, 0) FROM comment c LEFT JOIN user u ON u.id = c.author_id WHERE c.post_id = ?1 AND c.id > ?2 ORDER BY c.id LIMIT ?3",
+    AnyComment => "SELECT 1 FROM comment WHERE post_id = ?1 LIMIT 1",
     LastComment => "SELECT coalesce(max(id), 0) FROM comment WHERE post_id = ?1",
     LikeAdd => "INSERT INTO post_like(post_id, user_id, created_ms) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
     LikeDel => "DELETE FROM post_like WHERE post_id = ?1 AND user_id = ?2",
@@ -275,6 +290,7 @@ queries! {
     Social => "SELECT like_count, comment_count FROM post WHERE id = ?1",
     ImageNew => "INSERT INTO image(key, post_id, author_id, type, bytes, created_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     ImageGet => "SELECT type, bytes FROM image WHERE key = ?1",
+    Gen => "SELECT n FROM gen WHERE id = 1",
     Sweep => "DELETE FROM challenge WHERE expires_ms < ?1",
     SweepTokens => "DELETE FROM email_token WHERE expires_ms < ?1",
     SweepSessions => "DELETE FROM session WHERE expires_ms < ?1",
