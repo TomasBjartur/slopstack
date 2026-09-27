@@ -219,7 +219,10 @@ impl Site {
 
     fn permit(&mut self, r: &R, blog: u64, post: u64, a: Action) -> Result<Permit, u16> {
         let f: Facts = self.st.facts(r.uid(), blog, post).map_err(db_code)?;
-        authorize(f, a).ok_or(if r.signed_in() { 404u16 } else { 403 })
+        // Refused: a page is "not found" (whether it exists is not said);
+        // a change is "forbidden".
+        let read = r.req.method != b"POST";
+        authorize(f, a).ok_or(if read && r.signed_in() { 404u16 } else { 403 })
     }
 
     fn blog_id(&mut self, slug: &str) -> Result<(u64, String), u16> {
@@ -286,21 +289,23 @@ impl Site {
                 resp::redirect(out, "/", &resp::cookie(None, self.conf.secure));
                 Ok(())
             }
-            _ if !r.signed_in() => {
-                // Signed out (or the session ended): log in first.
-                resp::redirect(out, "/login", b"");
+            ["write"] if !r.signed_in() => {
+                resp::redirect(out, "/dash", b"");
                 Ok(())
             }
+            // Everything else changes content: a session first.
+            _ if !r.signed_in() => Err(403),
             ["blogs"] => self.new_blog(r, f, out),
             ["write"] => self.write(r, out),
             ["dash", blog, "posts"] => {
                 let (b, _) = self.blog_id(blog)?;
-                self.new_post(r, b, out)
+                self.new_post(r, b, Some(f), out)
             }
             ["dash", blog, "authors"] => self.add_author(r, blog, f, out),
             ["dash", blog, "authors", id, "remove"] => self.remove_author(r, blog, id, out),
             ["dash", blog, "delete"] => self.delete_blog(r, blog, out),
             ["edit", id] => self.save(r, id, f, out),
+            ["edit", id, "publish"] => self.publish_draft(r, id, out),
             ["edit", id, "unpublish"] => self.unpublish(r, id, out),
             ["edit", id, "delete"] => self.delete_post(r, id, out),
             _ => Err(404),
@@ -354,8 +359,10 @@ impl Site {
         let (id, title) = self.blog_id(slug)?;
         let page = r.page_no();
         let (rows, more) = self.feed(Q::BlogPosts, &[Val::Int(id as i64)], page)?;
+        let mut owner = (String::new(), String::new());
+        self.st.q(Q::BlogOwner, &[Val::Int(id as i64)], |row| owner = (row.text(0).into(), row.text(1).into())).map_err(db_code)?;
         let s = r.signed_in();
-        self.html(r, out, 200, |h| pages::blog(h, s, slug, &title, &rows, page, more));
+        self.html(r, out, 200, |h| pages::blog(h, s, slug, &title, &owner.0, &owner.1, &rows, page, more));
         Ok(())
     }
 
@@ -365,6 +372,10 @@ impl Site {
         let (id, name) = u.ok_or(404u16)?;
         let page = r.page_no();
         let (rows, more) = self.feed(Q::AuthorPosts, &[Val::Int(id)], page)?;
+        if rows.is_empty() && page == 1 {
+            // Only people who have published have a page.
+            return Err(404);
+        }
         let s = r.signed_in();
         self.html(r, out, 200, |h| pages::author(h, s, handle, &name, &rows, page, more));
         Ok(())
@@ -422,6 +433,7 @@ impl Site {
             words: m.words,
             published: m.published,
             can_edit,
+            just_published: can_edit && m.published && r.query == "published=1",
         };
         let s = r.signed_in();
         self.html(r, out, 200, |h| pages::post(h, s, &v, &body));
@@ -788,21 +800,35 @@ impl Site {
     fn write(&mut self, r: &mut R, out: &mut Vec<u8>) -> Res {
         let blogs = self.my_blogs(r.uid())?;
         if blogs.len() == 1 {
-            return self.new_post(r, blogs[0].id as u64, out);
+            return self.new_post(r, blogs[0].id as u64, None, out);
         }
         resp::redirect(out, "/dash", b"");
         Ok(())
     }
 
-    fn new_post(&mut self, r: &mut R, blog: u64, out: &mut Vec<u8>) -> Res {
+    /// A new draft: titled "Untitled" unless the form names it; its address
+    /// is a placeholder (draft-…) until its first publish takes one from
+    /// the title, unless the form chose one.
+    fn new_post(&mut self, r: &mut R, blog: u64, f: Option<&Form>, out: &mut Vec<u8>) -> Res {
+        let title = match f.and_then(|f| f.get("title")) {
+            Some(t) if !t.trim().is_empty() => f.and_then(|f| f.text("title", 200, false)).ok_or(400u16)?,
+            _ => "Untitled".to_string(),
+        };
+        let slug = match f.and_then(|f| f.get("slug")).map(str::trim) {
+            Some(s) if !s.is_empty() => {
+                if s.len() > 80 || s.starts_with("draft-") || !s.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
+                    return Err(400);
+                }
+                s.to_string()
+            }
+            _ => format!("draft-{}", hex(&r.random::<6>())),
+        };
         let p = self.permit(r, blog, 0, Action::CreatePost { blog })?;
         let (now, uid) = (r.now(), r.uid());
-        // A draft's address until its first publish (then from its title).
-        let slug = format!("draft-{}", hex(&r.random::<6>()));
         let id = self
             .st
             .write(&p, now, true, |st, _| {
-                st.run(Q::PostNew, &[Val::Int(blog as i64), Val::Text(slug.as_bytes()), Val::Text(b"Untitled"), Val::Int(uid as i64), Val::Int(now as i64)])?;
+                st.run(Q::PostNew, &[Val::Int(blog as i64), Val::Text(slug.as_bytes()), Val::Text(title.as_bytes()), Val::Int(uid as i64), Val::Int(now as i64)])?;
                 Ok(st.db.last_rowid())
             })
             .map_err(no_code)?;
@@ -873,7 +899,7 @@ impl Site {
         self.permit(r, 0, id, Action::EditPost { post: id })?;
         let mut e = None;
         self.st
-            .q(Q::EditGet, &[Val::Int(id as i64)], |row| e = Some((row.text(0).to_string(), row.text(1).to_string(), row.int(2) != 0, row.text(3).to_string(), row.text(5).to_string())))
+            .q(Q::EditGet, &[Val::Int(id as i64)], |row| e = Some((row.text(7).to_string(), row.text(1).to_string(), row.int(2) != 0, row.text(3).to_string(), row.text(5).to_string())))
             .map_err(db_code)?;
         let (title, slug, published, blog_slug, body) = e.ok_or(404u16)?;
         let rep = u32::from_le_bytes(r.random::<4>());
@@ -907,7 +933,7 @@ impl Site {
                 let mut cur = None;
                 st.q(Q::EditGet, &[Val::Int(id as i64)], |row| cur = Some((row.text(1).to_string(), row.text(3).to_string(), row.int(6) != 0)))?;
                 let (mut slug, blog_slug, never) = cur.ok_or(No::Denied)?;
-                if never {
+                if never && slug.starts_with("draft-") {
                     let base = slugify(&title, 72);
                     let base = if base.is_empty() { "post".to_string() } else { base };
                     slug = String::new();
@@ -923,11 +949,30 @@ impl Site {
                     }
                 }
                 st.run(Q::PostPublish, &[Val::Int(id as i64), Val::Text(title.as_bytes()), Val::Text(body.as_bytes()), Val::Int(words as i64), Val::Int(now as i64), Val::Text(slug.as_bytes())])?;
-                Ok(format!("/b/{blog_slug}/{slug}"))
+                Ok(format!("/b/{blog_slug}/{slug}?published=1"))
             })
             .map_err(no_code)?;
         resp::redirect(out, &dest, b"");
         Ok(())
+    }
+
+    /// Publish the saved draft as it is.
+    fn publish_draft(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
+        let pid = Site::post_id(id)?;
+        let mut d = None;
+        self.st.q(Q::EditGet, &[Val::Int(pid as i64)], |row| d = Some((row.text(7).to_string(), row.text(5).to_string()))).map_err(db_code)?;
+        let (title, body) = d.ok_or(404u16)?;
+        let mut f = Vec::new();
+        for (k, v) in [("title", title.as_str()), ("body", body.as_str()), ("action", "publish")] {
+            if !f.is_empty() {
+                f.push(b'&');
+            }
+            f.extend_from_slice(k.as_bytes());
+            f.push(b'=');
+            f.extend_from_slice(crate::form::encode(v).as_bytes());
+        }
+        let form = Form::parse(&f).ok_or(400u16)?;
+        self.save(r, id, &form, out)
     }
 
     fn unpublish(&mut self, r: &mut R, id: &str, out: &mut Vec<u8>) -> Res {
@@ -1002,6 +1047,13 @@ impl App for Site {
             Some(i) => (&target[..i], &target[i + 1..]),
             None => (target, ""),
         };
+        // A header that decides who you are or where you came from, twice:
+        // which one counts is not agreed on, so neither does.
+        if req.count(b"cookie") > 1 || req.count(b"sec-fetch-site") > 1 {
+            let mut r = R { req, cx, path: "/", query: "", who: None, head_only: false, ds: false };
+            self.error_page(&mut r, out, 400);
+            return true;
+        }
         let who = self.who(req, now);
         let ds = req.header(b"datastar-request").is_some();
         let mut r = R { req, cx, path, query, who, head_only: req.method == b"HEAD", ds };

@@ -83,11 +83,12 @@ fn run() {
         return;
     }
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8190);
-    let io = io::LinuxIo::new(port).unwrap_or_else(|e| panic!("cannot listen on {port}: errno {e}"));
-    eprintln!("listening on 127.0.0.1:{port}");
+    // The database first (migrated): nobody connects before it is ready.
     let path = std::env::var("BLOG_DB").unwrap_or_else(|_| "blog.db".into());
     let st = db::Store::open(&path).unwrap_or_else(|e| panic!("cannot open {path}: {e:?}"));
     let site = site::Site::new(st, site::Conf::from_env(port));
+    let io = io::LinuxIo::new(port).unwrap_or_else(|e| panic!("cannot listen on {port}: errno {e}"));
+    eprintln!("listening on 127.0.0.1:{port}");
     let mut s = server::Server::new(io, site);
     loop {
         s.turn(1000);

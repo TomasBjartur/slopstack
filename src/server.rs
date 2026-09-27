@@ -31,6 +31,11 @@ pub struct Request<'a> {
 }
 
 impl<'a> Request<'a> {
+    /// How many times a header is present.
+    pub fn count(&self, name: &[u8]) -> usize {
+        self.headers.iter().filter(|h| self.head[h.start..h.name_end].eq_ignore_ascii_case(name)).count()
+    }
+
     pub fn header(&self, name: &[u8]) -> Option<&'a [u8]> {
         for h in self.headers {
             if self.head[h.start..h.name_end].eq_ignore_ascii_case(name) {

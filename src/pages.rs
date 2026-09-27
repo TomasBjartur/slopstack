@@ -184,9 +184,9 @@ pub fn home(h: &mut H, signed_in: bool, rows: &[FeedItem], page: u64, more: bool
     close(h);
 }
 
-pub fn blog(h: &mut H, signed_in: bool, slug: &str, title: &str, rows: &[FeedItem], page: u64, more: bool) {
+pub fn blog(h: &mut H, signed_in: bool, slug: &str, title: &str, owner: &str, owner_handle: &str, rows: &[FeedItem], page: u64, more: bool) {
     open(h, title, signed_in, false);
-    h.r("<header class=\"masthead\"><h1>").t(title).r("</h1></header>");
+    h.r("<header class=\"masthead\"><h1>").t(title).r("</h1><p class=\"muted\">by <a href=\"/u/").t(owner_handle).r("\">").t(owner).r("</a></p></header>");
     if rows.is_empty() {
         h.r("<div class=\"empty\"><p>No posts yet.</p></div>");
     } else {
@@ -221,10 +221,14 @@ pub struct PostView<'a> {
     pub words: i64,
     pub published: bool,
     pub can_edit: bool,
+    pub just_published: bool,
 }
 
 pub fn post(h: &mut H, signed_in: bool, v: &PostView, body: &Markup) {
     open(h, v.title, signed_in, false);
+    if v.just_published {
+        h.r("<p class=\"notice\" role=\"status\">Your post is live. Share its address: readers see it now.</p>");
+    }
     h.r("<article class=\"article\"><header><a class=\"pub\" href=\"/b/").t(v.blog_slug).r("\">").t(v.blog_title).r("</a><h1>").t(v.title).r("</h1><div class=\"byline\"><strong><a href=\"/u/").t(v.handle).r("\">").t(v.author).r("</a></strong><span class=\"dot\"></span>");
     date(h, v.published_ms);
     h.r("<span class=\"dot\"></span>");

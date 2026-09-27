@@ -74,6 +74,22 @@ impl Form {
     }
 }
 
+/// Percent-encodes a value for a form body (the inverse of parse).
+pub fn encode(v: &str) -> String {
+    const H: &[u8; 16] = b"0123456789ABCDEF";
+    let mut s = String::with_capacity(v.len());
+    for &c in v.as_bytes() {
+        if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.' || c == b'~' {
+            s.push(c as char);
+        } else {
+            s.push('%');
+            s.push(H[(c >> 4) as usize] as char);
+            s.push(H[(c & 15) as usize] as char);
+        }
+    }
+    s
+}
+
 /// A slug from a title: lower-case ASCII letters and digits, words joined
 /// by '-', at most max bytes; "" if nothing is left.
 pub fn slugify(title: &str, max: usize) -> String {

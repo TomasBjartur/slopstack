@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""End-to-end tests: honest flows and attacks against a running server.
+
+Starts build/server on a fresh database, creates users and sessions
+directly in SQLite (passkey login has its own test: passkey_test.py), then
+drives the app over raw HTTP. usage: tests/app_test.py
+"""
+import html, hashlib, os, re, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.parse
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PORT = 8099
+fails = 0
+
+
+def check(name, ok, detail=""):
+    global fails
+    fails += 0 if ok else 1
+    print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"   {detail}"))
+
+
+# This test writes far faster than a person: each POST starts with a fresh
+# write budget (30 a minute; its own test: tests/redteam_test.py).
+BUDGET_DB = None
+
+
+def fresh_budget():
+    if BUDGET_DB:
+        c = sqlite3.connect(BUDGET_DB, timeout=5)
+        c.execute("DELETE FROM write_budget")
+        c.commit()
+        c.close()
+
+
+def req(method, path, token=None, form=None, site="same-origin", extra=b"", host="localhost"):
+    if method == "POST":
+        fresh_budget()
+    body = urllib.parse.urlencode(form).encode() if form is not None else b""
+    head = f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n"
+    if token:
+        head += f"Cookie: sid={token}\r\n"
+    if site:
+        head += f"Sec-Fetch-Site: {site}\r\n"
+    if form is not None:
+        head += f"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {len(body)}\r\n"
+    data = head.encode() + extra + b"\r\n" + body
+    s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+    s.sendall(data)
+    out = b""
+    try:
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            out += b
+    except (ConnectionResetError, socket.timeout):
+        pass
+    s.close()
+    head, _, body = out.partition(b"\r\n\r\n")
+    status = int(head.split(b" ")[1]) if head.startswith(b"HTTP/1.1 ") else 0
+    loc = re.search(rb"\r\nLocation: ([^\r]*)", head)
+    return status, (loc.group(1).decode() if loc else None), body.decode("utf-8", "replace"), head.decode("latin-1")
+
+
+def raw_post(path, token, data, site="same-origin"):
+    head = f"POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: image/png\r\nContent-Length: {len(data)}\r\n"
+    if token:
+        head += f"Cookie: sid={token}\r\n"
+    if site:
+        head += f"Sec-Fetch-Site: {site}\r\n"
+    s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+    try:
+        s.sendall(head.encode() + b"\r\n" + data)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    out = b""
+    try:
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            out += b
+    except (ConnectionResetError, socket.timeout):
+        pass
+    s.close()
+    h, _, body = out.partition(b"\r\n\r\n")
+    return (int(h.split(b" ")[1]) if h.startswith(b"HTTP/1.1 ") else 0), body.decode("latin-1")
+
+
+def stream_read(path, token=None, want="", secs=5.0):
+    """Reads an event stream until `want` appears or secs pass; answers the
+    status and what came."""
+    s = socket.create_connection(("127.0.0.1", PORT), timeout=secs)
+    h = f"GET {path} HTTP/1.1\r\nHost: localhost\r\n"
+    if token:
+        h += f"Cookie: sid={token}\r\n"
+    s.sendall((h + "\r\n").encode())
+    out, end = b"", time.time() + secs
+    try:
+        while time.time() < end:
+            s.settimeout(max(0.05, end - time.time()))
+            b = s.recv(65536)
+            if not b:
+                break
+            out += b
+            if want and want.encode() in out:
+                break
+    except socket.timeout:
+        pass
+    s.close()
+    head, _, body = out.partition(b"\r\n\r\n")
+    st = int(head.split(b" ")[1]) if head.startswith(b"HTTP/1.1 ") else 0
+    return st, body.decode("utf-8", "replace"), head.decode("latin-1")
+
+
+def raw_get(path):
+    s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+    s.sendall(f"GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".encode())
+    out = b""
+    while True:
+        b = s.recv(65536)
+        if not b:
+            break
+        out += b
+    s.close()
+    return out.partition(b"\r\n\r\n")[2]
+
+
+def main():
+    tmp = tempfile.mkdtemp()
+    dbpath = os.path.join(tmp, "blog.db")
+    global BUDGET_DB
+    BUDGET_DB = dbpath
+    env = dict(os.environ, PORT=str(PORT), BLOG_DB=dbpath, BLOG_TICK_MS="0")
+    srv = subprocess.Popen([os.path.join(ROOT, "build/server")], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(50):
+            try:
+                socket.create_connection(("127.0.0.1", PORT), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        run(dbpath)
+    finally:
+        srv.terminate()
+        srv.wait()
+        err = srv.stderr.read().decode("utf-8", "replace").strip()
+        if err:
+            print("server stderr:", err[-2000:])
+    print(f"\n{fails} failure(s)")
+    sys.exit(1 if fails else 0)
+
+
+def user(db, email, name):
+    cur = db.execute("INSERT INTO user(email, name, handle, created_ms) VALUES (?, ?, ?, 1)", (email, name, name.lower()))
+    uid = cur.lastrowid
+    raw = secrets.token_bytes(32)
+    now = int(time.time() * 1000)
+    db.execute("INSERT INTO session VALUES (?, ?, ?, ?)", (hashlib.sha256(raw).digest(), uid, now, now + 3600_000))
+    db.commit()
+    return uid, raw.hex()
+
+
+def new_session(db, uid):
+    raw = secrets.token_bytes(32)
+    now = int(time.time() * 1000)
+    db.execute("INSERT INTO session VALUES (?, ?, ?, ?)", (hashlib.sha256(raw).digest(), uid, now, now + 3600_000))
+    db.commit()
+    return raw.hex()
+
+
+def run(dbpath):
+    db = sqlite3.connect(dbpath)
+    a_id, a = user(db, "alice@example.com", "Alice")
+    b_id, b = user(db, "bob@example.com", "Bob")
+    c_id, c = user(db, "mallory@example.com", "Mallory")
+
+    # Honest flow.
+    st, _, body, _ = req("GET", "/")
+    check("home renders", st == 200 and "Recent posts" in body, st)
+    st, loc, _, _ = req("GET", "/dash")
+    check("dash redirects anonymous to login", st == 303 and loc == "/login", (st, loc))
+    st, _, body, _ = req("GET", "/dash", a)
+    check("dash for Alice", st == 200 and "Your blogs" in body, st)
+    st, loc, _, _ = req("POST", "/blogs", a, {"slug": "alice", "title": "Alice's <Notes>"})
+    check("create blog", st == 303 and loc == "/dash/alice", (st, loc))
+    st, _, body, _ = req("GET", "/dash/alice", a)
+    check("blog admin", st == 200 and "Alice's &lt;Notes&gt;" in body, st)
+    st, loc, _, _ = req("POST", "/dash/alice/posts", a, {"slug": "first", "title": "First post"})
+    check("create post", st == 303 and loc and loc.startswith("/edit/"), (st, loc))
+    pid = loc.rsplit("/", 1)[1]
+    xss = '<script>alert("x")</script> & "quotes" \'single\''
+    st, loc, _, _ = req("POST", f"/edit/{pid}", a, {"title": "First <post>", "body": "Hello " + xss + "\nsecond line"})
+    check("save post", st == 303 and loc == f"/edit/{pid}", (st, loc))
+    st, _, body, _ = req("GET", f"/edit/{pid}", a)
+    check("editor shows escaped markdown", st == 200 and "&lt;script&gt;" in body and "<script>" not in body, st)
+
+    # Drafts are private.
+    st, _, body, _ = req("GET", "/b/alice/first")
+    check("draft is 404 for anonymous", st == 404, st)
+    st, _, body, _ = req("GET", "/b/alice/first", c)
+    check("draft is 404 for outsider", st == 404, st)
+    st, _, body, _ = req("GET", "/b/alice/first", a)
+    check("draft visible to owner, body spliced", st == 200 and "second line" in body and "Draft" in body, (st, body[:200]))
+    check("stored body is escaped", "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" in body and "<script>" not in body)
+    check("title escaped", "First &lt;post&gt;" in body)
+
+    # Publish: now public.
+    st, loc, _, _ = req("POST", f"/edit/{pid}/publish", a)
+    check("publish", st == 303 and loc == "/b/alice/first?published=1", (st, loc))
+    st, _, body, _ = req("GET", "/b/alice/first")
+    check("published post public", st == 200 and "second line" in body and "Draft" not in body, st)
+    st, _, body, _ = req("GET", "/")
+    check("home lists it", "First &lt;post&gt;" in body)
+    st, _, body, _ = req("GET", "/b/alice")
+    check("blog page lists it", st == 200 and "/b/alice/first" in body, st)
+
+    # CSRF.
+    st, _, _, _ = req("POST", f"/edit/{pid}/unpublish", a, site=None)
+    check("CSRF: no Sec-Fetch-Site -> 403", st == 403, st)
+    st, _, _, _ = req("POST", f"/edit/{pid}/unpublish", a, site="cross-site")
+    check("CSRF: cross-site -> 403", st == 403, st)
+    st, _, _, _ = req("POST", f"/edit/{pid}/unpublish", a, site="same-site")
+    check("CSRF: same-site (not same-origin) -> 403", st == 403, st)
+    st, _, body, _ = req("GET", "/b/alice/first")
+    check("post still published after CSRF attempts", st == 200)
+
+    # Outsider attacks.
+    st, _, _, _ = req("GET", f"/edit/{pid}", c)
+    check("outsider: editor 404", st == 404, st)
+    st, _, _, _ = req("POST", f"/edit/{pid}", c, {"title": "pwned", "body": "pwned"})
+    check("outsider: save 403", st == 403, st)
+    st, _, _, _ = req("POST", f"/edit/{pid}/delete", c)
+    check("outsider: delete 403", st == 403, st)
+    st, _, _, _ = req("GET", "/dash/alice", c)
+    check("outsider: blog admin 404", st == 404, st)
+    st, _, _, _ = req("POST", "/dash/alice/posts", c, {"slug": "spam", "title": "spam"})
+    check("outsider: create post 403", st == 403, st)
+    st, _, _, _ = req("POST", "/dash/alice/authors", c, {"email": "mallory@example.com"})
+    check("outsider: add self as author 403", st == 403, st)
+    st, _, _, _ = req("POST", f"/edit/{pid}", None, {"title": "anon", "body": "anon"})
+    check("anonymous: save 403", st == 403, st)
+    forged = secrets.token_hex(32)
+    st, _, _, _ = req("POST", f"/edit/{pid}", forged, {"title": "forged", "body": "forged"})
+    check("forged cookie: save 403", st == 403, st)
+    st, _, _, _ = req("POST", f"/edit/{pid}", a.upper(), {"title": "upper", "body": "upper"})
+    check("uppercase variant of a real token: 403", st == 403, st)
+    st, _, _, _ = req("POST", f"/edit/{pid}", a, {"title": "x"}, extra=f"Cookie: sid={c}\r\n".encode())
+    check("two Cookie headers: rejected", st == 400, st)
+    st, _, body, _ = req("GET", "/b/alice/first")
+    check("post unchanged after attacks", "second line" in body and "pwned" not in body and "forged" not in body)
+
+    # Authors: add Bob, Bob writes, Bob removed, Bob cannot write.
+    st, _, body, _ = req("POST", "/dash/alice/authors", a, {"email": "bob@example.com"})
+    check("add author", st == 200 and "Added." in body, st)
+    st, loc, _, _ = req("POST", "/dash/alice/posts", b, {"slug": "bobs", "title": "Bob's draft"})
+    check("author creates post", st == 303 and loc.startswith("/edit/"), (st, loc))
+    bpid = loc.rsplit("/", 1)[1]
+    st, _, _, _ = req("POST", "/dash/alice/authors", b, {"email": "mallory@example.com"})
+    check("author cannot add authors", st == 403, st)
+    st, _, _, _ = req("POST", f"/dash/alice/authors/{a_id}/remove", b)
+    check("author cannot remove the owner", st == 403, st)
+    st, _, _, _ = req("POST", f"/dash/alice/authors/{a_id}/remove", a)
+    check("owner cannot remove themself", st == 403, st)
+    st, _, _, _ = req("POST", f"/dash/alice/authors/{b_id}/remove", a)
+    check("owner removes author", st == 303, st)
+    st, _, _, _ = req("POST", f"/edit/{bpid}", b, {"title": "late", "body": "late"})
+    check("removed author cannot edit", st == 403, st)
+    st, _, _, _ = req("GET", f"/edit/{bpid}", b)
+    check("removed author cannot open editor", st == 404, st)
+
+    # Input validation.
+    st, _, _, _ = req("POST", "/blogs", a, {"slug": "../etc", "title": "x"})
+    check("bad slug -> 400", st == 400, st)
+    st, _, _, _ = req("POST", "/blogs", a, {"slug": "alice", "title": "dup"})
+    check("duplicate slug -> 409", st == 409, st)
+    st, _, _, _ = req("POST", "/blogs", a, {"slug": "ctl", "title": "a\x01b"})
+    check("control char in title -> 400", st == 400, st)
+    check("unicode title ok", req("POST", "/blogs", a, {"slug": "uni", "title": "Café ☕ 日本"})[0] == 303)
+    st, _, body, _ = req("GET", "/b/uni")
+    check("unicode round-trips", "Café ☕ 日本" in body, body[:300])
+
+    a2 = new_session(db, a_id)
+
+    # Logout ends the session server-side.
+    st, loc, _, head = req("POST", "/logout", a)
+    check("logout clears cookie", st == 303 and "Max-Age=0" in head, (st, head))
+    st, loc, _, _ = req("GET", "/dash", a)
+    check("old token no longer works", st == 303 and loc == "/login", (st, loc))
+
+    # Usability: addresses made from titles, save-and-publish, Edit links,
+    # bylines, cached assets.
+    st, loc, _, _ = req("POST", "/blogs", b, {"slug": "", "title": "Bob's Great Blog!"})
+    check("blog address from title", st == 303 and loc == "/dash/bob-s-great-blog", (st, loc))
+    st, loc, _, _ = req("POST", "/dash/bob-s-great-blog/posts", b, {"title": "Hello, World"})
+    check("post address from title", st == 303 and loc and loc.startswith("/edit/"), (st, loc))
+    ppid = loc.rsplit("/", 1)[1]
+    st, _, body, _ = req("GET", f"/edit/{ppid}", b)
+    check("new post: Publish button", st == 200 and 'value="publish"' in body and "Unpublish" not in body, st)
+    st, loc, _, _ = req("POST", f"/edit/{ppid}", b, {"title": "Hello, World", "body": "Words here.", "action": "publish"})
+    check("save and publish in one step, landing on the post", st == 303 and loc == "/b/bob-s-great-blog/hello-world?published=1", (st, loc))
+    st, _, body, _ = req("GET", "/b/bob-s-great-blog/hello-world")
+    check("published by the save", st == 200 and "Words here." in body and "Draft" not in body, st)
+    check("byline: linked author and reading time", '<strong><a href="/u/bob">Bob</a></strong>' in body and "1 min read" in body, body[:600])
+    check("no Edit link for anonymous", f'href="/edit/{ppid}"' not in body)
+    st, _, body, _ = req("GET", "/b/bob-s-great-blog/hello-world", b)
+    check("Edit link for the author", f'href="/edit/{ppid}"' in body)
+    st, _, body, _ = req("GET", "/b/bob-s-great-blog/hello-world", c)
+    check("no Edit link for an outsider", f'href="/edit/{ppid}"' not in body)
+    st, _, body, _ = req("GET", f"/edit/{ppid}", b)
+    check("published post: Update and Unpublish", 'value="publish"' in body and "Unpublish" in body and ">Update<" in body)
+    st, loc, _, _ = req("POST", f"/edit/{ppid}", c, {"title": "x", "body": "pwned", "action": "publish"})
+    check("outsider: save-and-publish 403", st == 403, st)
+    st, _, body, _ = req("GET", "/")
+    check("home: author and publication in the feed", "Bob's Great Blog!" in body and "Bob" in body and "min read" in body)
+    st, _, body, _ = req("GET", "/b/bob-s-great-blog")
+    check("blog page: by its owner", 'by <a href="/u/bob">Bob</a>' in body, body[:600])
+    m = re.search(r'href="(/s/app\.css\?v=[0-9a-f]+)"', body)
+    check("pages link a versioned stylesheet", m is not None)
+    st, _, css, head = req("GET", m.group(1) if m else "/s/app.css")
+    check("stylesheet served, cached immutably", st == 200 and "text/css" in head and "immutable" in head and ".article" in css, head)
+    # Signed out: revalidated, never in shared caches, allowed in the
+    # back/forward cache. Signed in (or setting a cookie): never stored.
+    for path in ("/", "/b/bob-s-great-blog"):
+        _, _, _, head = req("GET", path)
+        check(f"signed out: {path} revalidated, not stored by shared caches", "Cache-Control: private, no-cache" in head and "no-store" not in head, head)
+        _, _, _, head = req("GET", path, b)
+        check(f"signed in: {path} never stored", "Cache-Control: no-store" in head, head)
+    _, _, _, head = req("GET", "/dash", b)
+    check("signed in: dashboard never stored", "Cache-Control: no-store" in head, head)
+    st, _, _, _ = req("GET", "/s/nope.js")
+    check("unknown asset 404", st == 404, st)
+
+    # Write: a new untitled draft in your only blog, which takes its
+    # address from its title when first published (never after).
+    req("POST", "/blogs", b, {"title": "Bob Two"})
+    st, loc, _, _ = req("POST", "/write", b)
+    check("Write with several blogs: to the dashboard", st == 303 and loc == "/dash", (st, loc))
+    st, loc, _, _ = req("POST", "/write", c)
+    check("Write with no blog: to the dashboard", st == 303 and loc == "/dash", (st, loc))
+    _, _, body, _ = req("GET", "/dash", c)
+    check("dashboard without a blog: welcome", "Welcome!" in body and "Create my blog" in body)
+    req("POST", "/blogs", c, {"title": "Mallory Writes"})
+    st, loc, _, _ = req("POST", "/write", c)
+    check("Write with one blog: a new draft in the editor", st == 303 and loc and loc.startswith("/edit/"), (st, loc))
+    dpid = loc.rsplit("/", 1)[1]
+    slug = db.execute("SELECT slug, title FROM post WHERE id = ?", (dpid,)).fetchall()[0]  # (fetchone would keep a read open)
+    check("draft: placeholder address, Untitled", slug[0].startswith("draft-") and slug[1] == "Untitled", slug)
+    st, loc2, _, _ = req("POST", "/write", c)
+    check("a second draft does not collide", st == 303 and loc2 != loc, (st, loc2))
+    st, loc, _, _ = req("POST", f"/edit/{dpid}", c, {"title": "Hello, World", "body": "m", "action": "publish"})
+    check("first publish: address from title", loc == "/b/mallory-writes/hello-world?published=1", loc)
+    _, _, body, _ = req("GET", "/b/mallory-writes/hello-world?published=1", c)
+    check("notice for the author", "Your post is live" in body)
+    _, _, body, _ = req("GET", "/b/mallory-writes/hello-world?published=1")
+    check("no notice for readers", "Your post is live" not in body and "Hello, World" in body)
+    req("POST", f"/edit/{dpid}/unpublish", c)
+    st, loc, _, _ = req("POST", f"/edit/{dpid}", c, {"title": "Renamed", "body": "m", "action": "publish"})
+    check("published address never changes", loc == "/b/mallory-writes/hello-world?published=1", loc)
+    st, loc, _, _ = req("POST", "/dash/mallory-writes/posts", c)
+    st, loc, _, _ = req("POST", loc, c, {"title": "Hello, World", "body": "again", "action": "publish"})
+    check("same title again: deduplicated address", loc == "/b/mallory-writes/hello-world-2?published=1", loc)
+    st, loc, _, _ = req("POST", "/write", None)
+    check("Write anonymously: no draft, off to log in", st == 303 and loc == "/dash", (st, loc))
+
+    # Author pages: only for people who have published.
+    st, _, body, _ = req("GET", "/u/mallory")
+    check("author page lists their posts", st == 200 and "Mallory" in body and "hello-world-2" in body, st)
+    st, _, _, _ = req("GET", "/u/alice")
+    check("author page for Alice (published)", st == 200, st)
+    # (Also a regression test: another process writes after posts were
+    # viewed. The server once kept a read snapshot open after serving a
+    # post body, and every write after an outside write failed "locked".)
+    q = sqlite3.connect(dbpath)
+    q.execute("INSERT INTO user(email, name, handle, created_ms) VALUES ('quiet@example.com', 'Quiet', 'quiet', 1)")
+    q.commit()
+    q.close()
+    st, _, body, _ = req("GET", "/u/quiet")
+    check("no author page for someone who never published", st == 404 and "Quiet" not in body, st)
+    st, _, _, _ = req("GET", "/u/nobody_here")
+    check("author page: unknown handle 404", st == 404, st)
+
+    # The feed cache: every write is visible at once, and signed-in and
+    # anonymous visitors get their own header.
+    for _ in range(2):
+        req("GET", "/"), req("GET", "/", b), req("GET", "/b/bob-s-great-blog")
+    st, loc, _, _ = req("POST", "/dash/bob-s-great-blog/posts", b, {"title": "Cache probe"})
+    cpid = loc.rsplit("/", 1)[1]
+    req("POST", f"/edit/{cpid}", b, {"title": "Cache probe", "body": "x", "action": "publish"})
+    check("cache: published post on home at once", "Cache probe" in req("GET", "/")[2])
+    check("cache: and on its blog page", "Cache probe" in req("GET", "/b/bob-s-great-blog")[2])
+    req("POST", f"/edit/{cpid}/unpublish", b)
+    check("cache: unpublished post gone from home", "Cache probe" not in req("GET", "/")[2])
+    check("cache: and from its blog page", "Cache probe" not in req("GET", "/b/bob-s-great-blog")[2])
+    req("POST", f"/edit/{cpid}", b, {"title": "Cache probe 2", "body": "x", "action": "publish"})
+    # A signed-out visitor's post page is cached too, and dropped by each
+    # write to that post (not by writes elsewhere).
+    purl = "/b/bob-s-great-blog/cache-probe"
+    st, _, body, _ = req("GET", purl)
+    req("GET", purl)
+    check("cache: post page served", st == 200 and "Cache probe 2" in body, st)
+    req("POST", f"/edit/{cpid}", b, {"title": "Cache probe 3", "body": "fresh words"})
+    body = req("GET", purl)[2]
+    check("a save of a published post is a draft: readers still see the published text", "Cache probe 2" in body and "fresh words" not in body)
+    req("POST", f"/edit/{cpid}", b, {"title": "Cache probe 3", "body": "fresh words", "action": "publish"})
+    body = req("GET", purl)[2]
+    check("cache: updated post page at once", "Cache probe 3" in body and "fresh words" in body)
+    req("POST", f"/edit/{cpid}/unpublish", b)
+    check("cache: unpublished post page gone at once", req("GET", purl)[0] == 404)
+    req("POST", f"/edit/{cpid}", b, {"title": "Cache probe 4", "body": "x", "action": "publish"})
+    check("cache: republished post page back", "Cache probe 4" in req("GET", purl)[2])
+    req("POST", f"/edit/{cpid}/delete", b)
+    check("cache: deleted post page gone at once", req("GET", purl)[0] == 404)
+    check("cache: deleted post gone", "Cache probe" not in req("GET", "/")[2] and "Cache probe" not in req("GET", "/b/bob-s-great-blog")[2])
+    anon, signed_in = req("GET", "/")[2], req("GET", "/", b)[2]
+    check("cache: anonymous home has no Log out", "Log out" not in anon and "Log in" in anon)
+    check("cache: signed-in home has Log out", "Log out" in signed_in and "Log in" not in signed_in)
+    check("cache: anonymous again", "Log out" not in req("GET", "/")[2])
+
+
+    # Datastar: adding and removing an author answers with patches.
+    st, _, body, head = req("POST", "/dash/alice/authors", a2, {"email": "bob@example.com"}, extra=b"Datastar-Request: true\r\n")
+    check("Datastar add author: patches", st == 200 and "text/event-stream" in head and "event: datastar-patch-elements" in body and 'id="people"' in body and "Added." in body, (st, body[:300]))
+    st, _, body, head = req("POST", f"/dash/alice/authors/{b_id}/remove", a2, extra=b"Datastar-Request: true\r\n")
+    check("Datastar remove author: the list without Bob", st == 200 and 'id="people"' in body and "bob@example.com" not in body, (st, body[:300]))
+    st, _, body, head = req("POST", "/dash/alice/authors", a2, {"email": "nobody@example.com"}, extra=b"Datastar-Request: true\r\n")
+    check("Datastar: unknown email, a note", "No account with that email" in body, body[:300])
+    st, _, body, _ = req("POST", "/dash/alice/authors", c, {"email": "bob@example.com"}, extra=b"Datastar-Request: true\r\n")
+    # (Datastar applies only 200 answers: a refusal is a notice patched in.)
+    check("Datastar: an outsider gets a refusal, no list", "Not allowed" in body and "bob@example.com" not in body, (st, body[:200]))
+    st, _, body, _ = req("POST", "/dash/alice/authors", c, {"email": "nobody@example.com"}, extra=b"Datastar-Request: true\r\n")
+    check("an outsider cannot probe which emails have accounts", "Not allowed" in body and "No account" not in body, (st, body[:200]))
+
+    # Handles: the live check.
+    st, _, body, head = req("GET", "/handle?h=Alice")
+    check("handle check: taken", st == 200 and "taken" in body and "text/event-stream" in head, body)
+    st, _, body, _ = req("GET", "/handle?h=zelda_9")
+    check("handle check: available", "Available" in body, body)
+    st, _, body, _ = req("GET", "/handle?h=9x")
+    check("handle check: invalid", "starting with a letter" in body, body)
+
+    # Pages: the security headers and a fresh nonce on each.
+    _, _, b1, h1 = req("GET", "/")
+    _, _, b2, h2 = req("GET", "/")
+    n1 = re.search(r"'nonce-([A-Za-z0-9_-]+)'", h1)
+    n2 = re.search(r"'nonce-([A-Za-z0-9_-]+)'", h2)
+    check("CSP with a nonce, different per response", n1 and n2 and n1.group(1) != n2.group(1) and f'data-nonce="{n1.group(1)}"' in b1, (h1[:400]))
+    check("no unsafe-eval, no unsafe-inline", "unsafe-" not in h1)
+    for hd in ("X-Content-Type-Options: nosniff", "frame-ancestors 'none'", "Referrer-Policy: same-origin"):
+        check(f"header: {hd}", hd in h1)
+    st, _, _, _ = req("PUT", "/")
+    check("PUT: refused (501)", st == 501, st)
+    st, _, body, head = req("HEAD", "/")
+    check("HEAD: headers, no body", st == 200 and body == "" and "Content-Length: " in head and "Content-Length: 0" not in head, (st, len(body)))
+    st, _, _, _ = req("GET", "/b/alice/%2e%2e")
+    check("encoded dots: 404", st == 404, st)
+    st, _, _, _ = req("GET", "/edit/99999999999999999999")
+    check("huge post id: 404 or login", st in (303, 404), st)
+
+
+main()
