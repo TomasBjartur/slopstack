@@ -16,6 +16,7 @@ pub mod html;
 pub mod spec_webauthn;
 pub mod webauthn;
 pub mod markdown;
+pub mod crdt;
 pub mod md_tables;
 pub mod json;
 pub mod sys {
@@ -34,6 +35,7 @@ pub mod pages;
 pub mod site;
 pub mod sim;
 pub mod tests {
+    pub mod crdt;
     pub mod crypto;
     pub mod db;
     pub mod http;
@@ -52,6 +54,7 @@ fn run() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "test" {
         match args[2].as_str() {
+            "crdt" => tests::crdt::run(),
             "crypto" => tests::crypto::run(),
             "db" => tests::db::run(),
             "http" => tests::http::run(),
