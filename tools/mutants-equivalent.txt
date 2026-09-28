@@ -1,0 +1,6 @@
+# Mutants judged equivalent (they change nothing a user or the database can see), and why.
+# file|function|line as written (stripped)|what => why. A reason must hold in production, not just in the simulation.
+src/site.rs|delete_blog|self.docs.forget(id);|statement removed => forgetting deleted posts' documents only frees memory: ids are never reused, so they are never served; the cache's budget bounds them
+src/notify.rs|private|x.store(0, Ordering::SeqCst);|statement removed => Changes::private is the simulation's own: zeroing only resets counters that are compared for change, never for value
+src/site.rs|sweep|if now < self.swept_ms + 60_000 {|< -> <= => the sweep runs every 60 s or every 60 s and 1 ms: expired rows are ignored by every query anyway
+src/crdt.rs|memory|self.text.capacity() + self.rep.len() * (4 * 10 + 1 + 1) + self.index.len() * 24 + self.kids.len() * 64|\+ 1\b -> (removed) => memory() is an estimate for the cache's budget; one byte more or less changes nothing a user sees

@@ -106,6 +106,35 @@ CPU throttled. Sizes nobody tested are where the first version broke.
 - Lean 4.34.1 (`~/.elan/bin/lean`).
 - Chrome headless shell for browser tests (`~/opt/chrome-headless-shell-linux64`).
 
+## Simulation workflow (the whole-application simulation is the main test)
+
+A test is as good as what it makes happen and what it checks; both fall
+behind the code unless the work keeps them up. So:
+
+- **Before a commit that changes server code**: `tools/mutants.py --diff
+  <the commit it starts from>` (every mutant of the changed lines, run
+  against the simulation; minutes). Every survivor gets one of: a check
+  that kills it (an action, a fault, an invariant, an assertion); a
+  reason it is equivalent in `tools/mutants-equivalent.txt` (one that
+  holds in production, not only in the simulation); or an entry in
+  `docs/FINDINGS.md` as a known blind spot.
+- **Every feature enters the simulation** with an action that uses it and
+  both sides of its law: the oracle fails anything forbidden, and fails
+  anything allowed that does not succeed. A feature the simulation does
+  not use is not done. The coverage ratchet (`tools/sim_coverage.py`, in
+  `tools/check.sh`) fails when the simulation stops running code it ran.
+- **A bug found anywhere else** (Chrome, the red team, the live site)
+  first gets what the simulation was missing to see it; then it goes into
+  `tools/sim_acceptance.py`; then it is fixed.
+- **Simulated clients are strict**: they parse as a browser does (JSON
+  whole, headers and attributes as written), never by searching for a
+  substring. A lenient client hides a broken server.
+- **No invariant or assertion counts until a mutant is seen failing it**
+  (once, when it is added).
+- **The measure**: `tools/mutants.py --sample tools/mutants-sample1.json`
+  (the fixed sample; about 30 minutes), recorded in FINDINGS when the
+  simulation changes much. It only goes up.
+
 ## Checks (all before committing)
 
 - `tools/check.sh`: Verus on every proved module, Lean proofs, the unit

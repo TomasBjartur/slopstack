@@ -1,0 +1,422 @@
+[
+ {
+  "file": "src/site.rs",
+  "line": 1899,
+  "old": "        if !path.starts_with('/') || !path.is_ascii() {",
+  "new": "        if !path.starts_with('/') && !path.is_ascii() {",
+  "what": "\\|\\| -> &&"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 699,
+  "old": "                    self.close(slot);",
+  "new": "                    // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 460,
+  "old": "        self.bytes.push(bytes);",
+  "new": "        // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 311,
+  "old": "        resp::whole(out, 200, \"application/json\", Cache::NoStore, None, b\"\", body, true);",
+  "new": "        resp::whole(out, 200, \"application/json\", Cache::NoStore, None, b\"\", body, false);",
+  "what": "btrue\\b -> false"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 769,
+  "old": "            if self.next_ctr(rep) as u64 + n - 1 > u32::MAX as u64 {",
+  "new": "            if self.next_ctr(rep) as u64 + n > u32::MAX as u64 {",
+  "what": "- 1\\b -> (removed)"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 602,
+  "old": "                if rep == 0 || ctr == 0 || ctr as u64 + len as u64 - 1 > u32::MAX as u64 {",
+  "new": "                if rep == 0 && ctr == 0 || ctr as u64 + len as u64 - 1 > u32::MAX as u64 {",
+  "what": "\\|\\| -> &&"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 619,
+  "old": "            if rep != 0 && ctr != 0 && ctr as u64 + text.chars().count() as u64 - 1 <= u32::MAX as u64 && self.repeat(rep, ctr, parent, side, text)? {",
+  "new": "            if rep != 0 && ctr == 0 && ctr as u64 + text.chars().count() as u64 - 1 <= u32::MAX as u64 && self.repeat(rep, ctr, parent, side, text)? {",
+  "what": "!= -> =="
+ },
+ {
+  "file": "src/db.rs",
+  "line": 380,
+  "old": "        self.db.set_deadline(0);",
+  "new": "        // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1124,
+  "old": "            self.opens.retain(|_, v| v.0 == minute);",
+  "new": "            self.opens.retain(|_, v| v.0 != minute);",
+  "what": "== -> !="
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1200,
+  "old": "                if b.len() > TEXT_MAX || b.chars().any(|c| c.is_control() && c != '\\n' && c != '\\r' && c != '\\t') {",
+  "new": "                if b.len() >= TEXT_MAX || b.chars().any(|c| c.is_control() && c != '\\n' && c != '\\r' && c != '\\t') {",
+  "what": "> -> >="
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1369,
+  "old": "        self.waits.push(Wait { conn: r.cx.conn, post, uid, what, seen, until: r.cx.mono_ms + self.conf.wait_ms });",
+  "new": "        // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1579,
+  "old": "            pages::open(p, \"Comments\", s, false);",
+  "new": "            pages::open(p, \"Comments\", s, true);",
+  "what": "bfalse\\b -> true"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1025,
+  "old": "                if s.len() > 80 || s.starts_with(\"draft-\") || !s.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {",
+  "new": "                if s.len() > 80 || s.starts_with(\"draft-\") && !s.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {",
+  "what": "\\|\\| -> &&"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1746,
+  "old": "        if key.len() != 32 || !key.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {",
+  "new": "        if key.len() == 32 || !key.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {",
+  "what": "!= -> =="
+ },
+ {
+  "file": "src/site.rs",
+  "line": 992,
+  "old": "            self.docs.forget(id);",
+  "new": "            // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 559,
+  "old": "            let (wp, ws) = if k == ctr { (parent, side) } else { (key(rep, k - 1), RIGHT) };",
+  "new": "            let (wp, ws) = if k == ctr { (parent, side) } else { (key(rep, k), RIGHT) };",
+  "what": "- 1\\b -> (removed)"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1739,
+  "old": "            .write(&p, now, true, |st, _| Ok(st.run(Q::ImageNew, &[Val::Text(key.as_bytes()), Val::Int(pid as i64), Val::Int(uid as i64), Val::Text(ctype.as_bytes()), Val::Blob(b), Val::Int(now as i64)])?))",
+  "new": "            .write(&p, now, false, |st, _| Ok(st.run(Q::ImageNew, &[Val::Text(key.as_bytes()), Val::Int(pid as i64), Val::Int(uid as i64), Val::Text(ctype.as_bytes()), Val::Blob(b), Val::Int(now as i64)])?))",
+  "what": "btrue\\b -> false"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 465,
+  "old": "        a.push(Val::Int((page as i64 - 1) * PAGE_ITEMS));",
+  "new": "        a.push(Val::Int((page as i64) * PAGE_ITEMS));",
+  "what": "- 1\\b -> (removed)"
+ },
+ {
+  "file": "src/notify.rs",
+  "line": 40,
+  "old": "            x.store(0, Ordering::SeqCst);",
+  "new": "            // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 882,
+  "old": "            if side > 1 || dead > 1 || len == 0 || chars != len as u64 || rep == 0 || ctr == 0 || ctr as u64 + len as u64 - 1 > u32::MAX as u64 {",
+  "new": "            if side > 1 || dead > 1 || len == 0 || chars != len as u64 && rep == 0 || ctr == 0 || ctr as u64 + len as u64 - 1 > u32::MAX as u64 {",
+  "what": "\\|\\| -> &&"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 577,
+  "old": "                return true;",
+  "new": "                return false;",
+  "what": "btrue\\b -> false"
+ },
+ {
+  "file": "src/db.rs",
+  "line": 167,
+  "old": "     CREATE TRIGGER gen_post_del AFTER DELETE ON post WHEN OLD.published = 1 BEGIN UPDATE gen SET n = n + 1; END;",
+  "new": "     CREATE TRIGGER gen_post_del AFTER DELETE ON post WHEN OLD.published = 1 BEGIN UPDATE gen SET n = n; END;",
+  "what": "\\+ 1\\b -> (removed)"
+ },
+ {
+  "file": "src/db.rs",
+  "line": 403,
+  "old": "                if blog == 0 {",
+  "new": "                if blog != 0 {",
+  "what": "== -> !="
+ },
+ {
+  "file": "src/server.rs",
+  "line": 345,
+  "old": "        self.free_bodies.push(b);",
+  "new": "        // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1382,
+  "old": "            if cur == w.seen && now < w.until {",
+  "new": "            if cur != w.seen && now < w.until {",
+  "what": "== -> !="
+ },
+ {
+  "file": "src/server.rs",
+  "line": 292,
+  "old": "                self.free_slots.push(slot);",
+  "new": "                // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 673,
+  "old": "                && self.off[ru] + self.bytes[ru] == off",
+  "new": "                || self.off[ru] + self.bytes[ru] == off",
+  "what": "&& -> ||"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 704,
+  "old": "            if sent >= MAILS_PER_HOUR {",
+  "new": "            if sent > MAILS_PER_HOUR {",
+  "what": ">= -> >"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1813,
+  "old": "    } else if b.len() >= 12 && &b[..4] == b\"RIFF\" && &b[8..12] == b\"WEBP\" {",
+  "new": "    } else if b.len() >= 12 || &b[..4] == b\"RIFF\" && &b[8..12] == b\"WEBP\" {",
+  "what": "&& -> ||"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 92,
+  "old": "            out.extend_from_slice(text.as_bytes());",
+  "new": "            // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1761,
+  "old": "        if now < self.swept_ms + 60_000 {",
+  "new": "        if now <= self.swept_ms + 60_000 {",
+  "what": "< -> <="
+ },
+ {
+  "file": "src/db.rs",
+  "line": 168,
+  "old": "     CREATE TRIGGER gen_blog_upd AFTER UPDATE ON blog BEGIN UPDATE gen SET n = n + 1; END;",
+  "new": "     CREATE TRIGGER gen_blog_upd AFTER UPDATE ON blog BEGIN UPDATE gen SET n = n; END;",
+  "what": "\\+ 1\\b -> (removed)"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 475,
+  "old": "            if s.body != NONE {",
+  "new": "            if s.body == NONE {",
+  "what": "!= -> =="
+ },
+ {
+  "file": "src/server.rs",
+  "line": 173,
+  "old": "        self.free.push(i);",
+  "new": "        // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 277,
+  "old": "            self.sweep(now);",
+  "new": "            // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1822,
+  "old": "    j.push('\"');",
+  "new": "    // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1891,
+  "old": "        if req.count(b\"cookie\") > 1 || req.count(b\"sec-fetch-site\") > 1 {",
+  "new": "        if req.count(b\"cookie\") >= 1 || req.count(b\"sec-fetch-site\") > 1 {",
+  "what": "> -> >="
+ },
+ {
+  "file": "src/server.rs",
+  "line": 609,
+  "old": "                    self.drop_body(slot);",
+  "new": "                    // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 669,
+  "old": "        self.slots[slot as usize].parked = false;",
+  "new": "        self.slots[slot as usize].parked = true;",
+  "what": "bfalse\\b -> true"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 597,
+  "old": "            just_published: can_edit && m.published && r.query == \"published=1\",",
+  "new": "            just_published: can_edit && m.published || r.query == \"published=1\",",
+  "what": "&& -> ||"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 837,
+  "old": "        j.push_str(&wa::b64url_encode(&chal));",
+  "new": "        // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 353,
+  "old": "        if self.body_bytes + total > BODY_BYTES_MAX {",
+  "new": "        if self.body_bytes + total >= BODY_BYTES_MAX {",
+  "what": "> -> >="
+ },
+ {
+  "file": "src/site.rs",
+  "line": 873,
+  "old": "            if st.run(Q::ChallengeTake, &[Val::Blob(&chal_hash), Val::Int(2), Val::Int(now as i64), Val::Null]).map_err(db_code)? != 1 {",
+  "new": "            if st.run(Q::ChallengeTake, &[Val::Blob(&chal_hash), Val::Int(2), Val::Int(now as i64), Val::Null]).map_err(db_code)? == 1 {",
+  "what": "!= -> =="
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1420,
+  "old": "        true",
+  "new": "        false",
+  "what": "btrue\\b -> false"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 144,
+  "old": "            self.map.clear();",
+  "new": "            // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 687,
+  "old": "        self.send(slot);",
+  "new": "        // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/docs.rs",
+  "line": 240,
+  "old": "        if p == a.len() && p == b.len() {",
+  "new": "        if p == a.len() && p != b.len() {",
+  "what": "== -> !="
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1132,
+  "old": "        let big = text.len() > EMBED_MAX;",
+  "new": "        let big = text.len() >= EMBED_MAX;",
+  "what": "> -> >="
+ },
+ {
+  "file": "src/site.rs",
+  "line": 912,
+  "old": "        self.html(r, out, 200, |h| pages::dash(h, &blogs));",
+  "new": "        // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 784,
+  "old": "                dels.push((self.rep[ru], self.ctr[ru] + a, b - a));",
+  "new": "                // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1624,
+  "old": "                let root = if parent == 0 {",
+  "new": "                let root = if parent != 0 {",
+  "what": "== -> !="
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 668,
+  "old": "                && self.len[ru] + n <= RUN_MAX",
+  "new": "                || self.len[ru] + n <= RUN_MAX",
+  "what": "&& -> ||"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 284,
+  "old": "        self.text.capacity() + self.rep.len() * (4 * 10 + 1 + 1) + self.index.len() * 24 + self.kids.len() * 64",
+  "new": "        self.text.capacity() + self.rep.len() * (4 * 10 + 1) + self.index.len() * 24 + self.kids.len() * 64",
+  "what": "\\+ 1\\b -> (removed)"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 831,
+  "old": "        if let Some(&x) = self.blocks[b as usize].runs.get(i + 1) {",
+  "new": "        if let Some(&x) = self.blocks[b as usize].runs.get(i) {",
+  "what": "\\+ 1\\b -> (removed)"
+ },
+ {
+  "file": "src/site.rs",
+  "line": 1746,
+  "old": "        if key.len() != 32 || !key.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {",
+  "new": "        if key.len() != 32 && !key.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {",
+  "what": "\\|\\| -> &&"
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 885,
+  "old": "            if d.index.range(key(rep, ctr)..=key(rep, ctr + len - 1)).next().is_some() || d.find(key(rep, ctr)).is_some() {",
+  "new": "            if d.index.range(key(rep, ctr)..=key(rep, ctr + len)).next().is_some() || d.find(key(rep, ctr)).is_some() {",
+  "what": "- 1\\b -> (removed)"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 570,
+  "old": "            if len < total {",
+  "new": "            if len <= total {",
+  "what": "< -> <="
+ },
+ {
+  "file": "src/server.rs",
+  "line": 712,
+  "old": "        if self.pending_bytes + rest > PENDING_BYTES_MAX {",
+  "new": "        if self.pending_bytes + rest >= PENDING_BYTES_MAX {",
+  "what": "> -> >="
+ },
+ {
+  "file": "src/crdt.rs",
+  "line": 902,
+  "old": "                d.order.push(last);",
+  "new": "                // (removed by a mutant)",
+  "what": "statement removed"
+ },
+ {
+  "file": "src/server.rs",
+  "line": 596,
+  "old": "                let keep = self.app.handle(&req, &mut cx, &mut self.resp) && !wants_close;",
+  "new": "                let keep = self.app.handle(&req, &mut cx, &mut self.resp) || !wants_close;",
+  "what": "&& -> ||"
+ }
+]

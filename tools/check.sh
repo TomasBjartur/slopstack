@@ -23,6 +23,8 @@ done
 echo "== the whole application, simulated (src/tests/appsim: a fixed seed budget, then a replay)"
 build/server test appsim > build/test-appsim.log 2>&1 || { grep -A3 "VIOLATION\|FAIL" build/test-appsim.log | head -40; echo "FAILED: the simulation (build/test-appsim.log; each failing seed prints how to replay it)"; exit 1; }
 tail -2 build/test-appsim.log
+echo "== the simulation's line coverage of the server (a ratchet: tools/coverage-baseline.txt)"
+python3 tools/sim_coverage.py
 echo "== the browser's WebAssembly against the server's build"
 tools/build_wasm.sh
 "$HOME/opt/node/bin/node" tests/wasm_test.mjs | tail -1
