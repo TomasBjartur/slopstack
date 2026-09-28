@@ -29,6 +29,19 @@ impl Changes {
         Changes { c }
     }
 
+    /// For one process (the simulator: its workers share these). Made once
+    /// per thread and zeroed for each run.
+    pub fn private() -> Changes {
+        thread_local! {
+            static MINE: &'static [AtomicU32] = Box::leak((0..2 * SLOTS).map(|_| AtomicU32::new(0)).collect());
+        }
+        let c = MINE.with(|m| *m);
+        for x in c {
+            x.store(0, Ordering::SeqCst);
+        }
+        Changes { c }
+    }
+
     fn at(&self, k: Kind, post: u64) -> &AtomicU32 {
         &self.c[k as usize * SLOTS + (post % SLOTS as u64) as usize]
     }

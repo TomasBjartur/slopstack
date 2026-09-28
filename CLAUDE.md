@@ -39,8 +39,10 @@ CPU throttled. Sizes nobody tested are where the first version broke.
 - **Label every guarantee**: proved about the code, proved about a model,
   or tested (how).
 - **All I/O goes through the `Io` trait** so the simulator can run it
-  (network, clocks, randomness today; the database and injected faults
-  are planned: DESIGN.md, "Whole-app simulation").
+  (network, clocks, randomness). The database is a real SQLite file in
+  the simulation, with faults injected at `Store`; anything else that
+  varies (a hash map's order, a clock read directly) must come from the
+  seed, or a run stops replaying.
 - **Every loop is bounded, every buffer sized from a named limit** in
   `src/limits.rs`; exceeding one is a handled error.
 - **`unsafe` only in `src/sys/`** (syscalls, FFI), each block with a
@@ -107,8 +109,14 @@ CPU throttled. Sizes nobody tested are where the first version broke.
 ## Checks (all before committing)
 
 - `tools/check.sh`: Verus on every proved module, Lean proofs, the unit
-  and property tests, the simulator's seeds, the 10x performance tests,
+  and property tests, the event loop's simulator, **the whole-application
+  simulation** (50 seeds, ~20 s; a failing seed prints its replay:
+  `build/server test appsim SEED SECONDS`), the 10x performance tests,
   the WebAssembly build against the native one, the CRDT against Lean.
+- `tools/sim_acceptance.py` (~10 min; after changing the simulation or
+  its oracle): puts back each known bug it should see and requires a seed
+  to find it. A simulator that stops finding them is modelling the wrong
+  world. A new bug it should have seen goes into its list.
 - `tools/check_e2e.sh`: every end-to-end suite (HTTP flows and attacks,
   passkeys, sync, red team, workers, real Chrome: browser, collab,
   editor, large, usability, ux; the fuzzer).

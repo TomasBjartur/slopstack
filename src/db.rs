@@ -308,6 +308,19 @@ pub struct Store {
     pub db: Db,
     /// The id of the first statement of SQL (migrate prepares its own).
     base: usize,
+    /// Faults injected before each statement (the simulator's; None in
+    /// production).
+    pub faults: Option<Box<dyn FnMut(Q) -> Fault>>,
+}
+
+/// What an injected fault does to a statement.
+pub enum Fault {
+    None,
+    /// The statement fails as SQLite's would when busy or out of space.
+    Error,
+    /// The process dies here (the simulator catches the unwind and drops
+    /// this worker: an open transaction is rolled back by SQLite).
+    Crash,
 }
 
 /// Why a write did not happen.
@@ -349,10 +362,19 @@ impl Store {
             }
             assert_eq!(id, base + i, "statement order");
         }
-        Ok(Store { db, base })
+        Ok(Store { db, base, faults: None })
+    }
+
+    fn fault(&mut self, q: Q) -> Result<(), DbErr> {
+        match self.faults.as_mut().map_or(Fault::None, |f| f(q)) {
+            Fault::None => Ok(()),
+            Fault::Error => Err(DbErr::Other("injected: database is locked".into())),
+            Fault::Crash => panic!("simulated crash"),
+        }
     }
 
     pub fn q(&mut self, q: Q, args: &[Val], f: impl FnMut(&Row)) -> Result<usize, DbErr> {
+        self.fault(q)?;
         self.db.set_deadline(250);
         let r = self.db.query(self.base + q as usize, args, f);
         self.db.set_deadline(0);
@@ -360,10 +382,12 @@ impl Store {
     }
 
     pub fn run(&mut self, q: Q, args: &[Val]) -> Result<u64, DbErr> {
+        self.fault(q)?;
         self.db.run(self.base + q as usize, args)
     }
 
     pub fn one(&mut self, q: Q, args: &[Val]) -> Result<Option<i64>, DbErr> {
+        self.fault(q)?;
         self.db.one_int(self.base + q as usize, args)
     }
 
@@ -423,9 +447,23 @@ impl Store {
         })();
         match r {
             Ok(v) => {
-                self.run(Q::Commit, &[])?;
+                self.commit()?;
                 Ok(v)
             }
+            Err(e) => {
+                let _ = self.run(Q::Rollback, &[]);
+                Err(e)
+            }
+        }
+    }
+
+    /// Ends a transaction. If COMMIT fails (busy, full, I/O), the
+    /// transaction is rolled back here: SQLite leaves it open after a busy
+    /// COMMIT, and an open one would hold every other worker's writes (the
+    /// whole-app simulation found this: every write failed after one).
+    pub fn commit(&mut self) -> Result<(), DbErr> {
+        match self.run(Q::Commit, &[]) {
+            Ok(_) => Ok(()),
             Err(e) => {
                 let _ = self.run(Q::Rollback, &[]);
                 Err(e)

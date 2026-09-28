@@ -89,10 +89,10 @@ none is planned.
   requests of the event loop are the place to start.
 - **The outside world behind a trait** (`Io`: accept, read, write, close,
   the monotonic and wall clocks, randomness). Production implements it
-  with syscalls; the **simulator** (`src/sim.rs`) with a seeded model of
-  the network. Today it runs the event loop only, with a small test
-  application; the database is not behind `Io`. Running the real
-  application under it is the next step (below, "Whole-app simulation").
+  with syscalls; two simulators with seeded models of the network: one
+  for the event loop alone (`src/sim.rs`), one for the whole application
+  (`src/tests/appsim/`, below). The database is not behind `Io`: the
+  simulation uses a real SQLite file and injects faults at `Store`.
 - **Memory**: fixed pools allocated at start from named limits
   (connections, buffers, rows). Past a limit the answer is a clear refusal
   (503, 413, 429), never an allocation.
@@ -184,7 +184,7 @@ The layers, with what exists today:
 | Kani for `unsafe` (`src/sys/`) | planned, not used |
 | Differential tests: fast code against a slow reference | built: the CRDT against a naive walk and the Lean definitions; WebAssembly against the server's build; chunked text against strings |
 | Property tests and fuzzing (seeded) | built |
-| Deterministic simulation | the event loop only (network faults, 100,000 connections, parked requests). Planned: the whole application (below) |
+| Deterministic simulation | built: the event loop (network faults, 100,000 connections, parked requests), and the whole application (below) |
 | Browser tests that act as people do | built (Chrome; Safari not automated) |
 | Performance budgets as tests, at 10x | built |
 | Adversarial review | the red-team suite (every kind of user against every route); no separate review pass yet |
@@ -192,45 +192,68 @@ The layers, with what exists today:
 Every guarantee is labelled "proved about the code", "proved about a
 model", or "tested (how)".
 
-### Whole-app simulation (planned)
+### Whole-app simulation (built: `src/tests/appsim/`)
 
-The real application (`Site`, SQLite, the CRDT, sessions, comments) run
-by the simulator with simulated users, so the bugs found so far by hand
-in Chrome are found by seeds instead.
+The real application (`Site`, SQLite, the CRDT, sessions, comments,
+parked requests) run by the simulator with simulated users, so the bugs
+found so far by hand in Chrome are found by seeds instead. Run by
+`tools/check.sh` (50 seeds of two simulated minutes: about 20 s);
+`tools/sim_acceptance.py` checks it still finds the known bugs. What is
+below is what it does; where it falls short is said.
 
 - **Determinism.** Everything that varies comes from the seed: the
   network and both clocks (already), randomness (already, `Ctx.random`),
   hash maps (a seeded hasher: `HashMap`'s own order is random per process
   and cache eviction depends on it), the database (SQLite is
-  deterministic given the same statements; a file per run, or in memory).
+  deterministic given the same statements; a file per run in /dev/shm;
+  its query deadlines, which read the real clock, off; a busy lock
+  answers at once instead of sleeping). Checked: a seed gives the same
+  digest of everything clients received, in one process and across two.
 - **Workers.** Several `Site`s in one process on one database and one set
   of change counters, as the worker processes share them.
 - **Faults.** Network ones (as now); the wall clock jumping apart from the
   monotonic one; a worker crashing mid-request and starting again (its
   memory gone, the database kept); SQLite busy and write errors, injected
   at `Store` by the seed.
-- **Users.** Seeded clients speaking the real protocols: editors, each
-  with a `src/crdt.rs` replica, typing, going offline, reloading with
-  unsent edits (a new replica number), restarting the browser; readers
-  and commenters; owners adding and removing authors; sign-in and
-  session expiry.
-- **Invariants, checked throughout.** Once quiet, every replica's text is
-  the server's; nobody receives a draft or a document they may not see
-  (the laws of `spec/authz.rs`, run as oracles on every request); every
-  rendered page's post and comment bodies pass the markup law; every
-  request is answered or its connection closed; sessions end on the wall
-  clock; memory stays within its limits.
+- **Users.** Seeded clients speaking the real protocols: sign-up and
+  login with real passkeys (a simulated authenticator signing with
+  HACL*'s P-256); editors, each with a `src/crdt.rs` replica, typing,
+  going offline, reloading with unsent edits (a new replica number),
+  restarting the browser (only what local storage kept survives);
+  readers following comments live; commenters; owners adding and
+  removing authors, deleting posts and blogs; and, one action in twelve,
+  curiosity: trying what may be refused (others' drafts, editors,
+  previews, sync; publishing, deleting, managing authors on others'
+  blogs), since a law nobody tests from the wrong side is not tested. The editor clients follow
+  `web/editor.js`'s rules but are not it: a bug in the page's own
+  JavaScript is not seen here.
+- **Invariants, checked throughout** (the oracle, `oracle.rs`, sees each
+  answer as it is made, with the database as it is then, read by its own
+  SQL). Writers type tokens naming the post they are in, so every piece
+  of text in any answer is traced: it must be of the post asked about, of
+  a post that still exists, and readable by the asker under the law. Every
+  change to content must be permitted by the law, run by the oracle's own
+  reading of it (`law.rs`: proved equal to `spec/authz.rs`, written apart
+  from the server's `src/authz.rs`) on facts it reads itself. Rendered bodies pass an
+  independent checker of the markup law (tested, not proved). No page
+  shows someone signed in whose session has ended by the wall clock; no
+  stored date is before 2020. Between requests no transaction is open;
+  every request is answered within 45 s or closed; memory stays within
+  each cache's limit; once faults stop, nothing fails (no 5xx). At the
+  end, every open editor of a member shows exactly the server's text.
 - **The simulator must find the bugs already found.** Its acceptance
-  test: put back, one at a time, the bugs in docs/FINDINGS.md that it
-  should see (dates in monotonic time; a reused id serving another post's
-  text; a writer not sent an earlier page's edits; a stale answer to a
-  reused connection), and each must fail a seed within minutes of
-  running. A simulator that misses them is modelling the wrong world.
+  test (`tools/sim_acceptance.py`) puts back, one at a time, the bugs it
+  should see (dates in monotonic time; reused post ids; a writer not sent
+  an earlier page's edits; a stale answer to a reused connection; and the
+  two it found itself, and two breaks of the authorization law in the
+  server's code), and each must fail a seed within minutes. All eight are
+  found, each within 4 s of running (docs/FINDINGS.md). A simulator
+  that misses them is modelling the wrong world.
 - **What stays in real browsers**: layout and its cost, input methods,
   the DOM (a comment shown twice is a page fact), Datastar's behaviour,
-  Safari. The editor's sync logic (queue, send, listen, restore) could
-  later run in Node under the same kind of seeded scheduler, once it is
-  separated from the DOM.
+  Safari, and `web/editor.js` itself. Planned: the editor's sync logic
+  (queue, send, listen, restore) separated from the DOM and run in Node
+  under the same kind of seeded scheduler, against this simulation.
 
 ## Principles learned in the building
 

@@ -39,6 +39,7 @@ extern "C" {
     fn sqlite3_errmsg(db: *mut sqlite3) -> *const c_char;
     fn sqlite3_changes64(db: *mut sqlite3) -> i64;
     fn sqlite3_last_insert_rowid(db: *mut sqlite3) -> i64;
+    fn sqlite3_get_autocommit(db: *mut sqlite3) -> c_int;
     fn sqlite3_busy_timeout(db: *mut sqlite3, ms: c_int) -> c_int;
     fn sqlite3_db_config(db: *mut sqlite3, op: c_int, ...) -> c_int;
     fn sqlite3_progress_handler(db: *mut sqlite3, n: c_int, cb: Option<extern "C" fn(*mut c_void) -> c_int>, arg: *mut c_void);
@@ -143,10 +144,18 @@ pub struct Db {
 // another thread (a helper's reader) is fine.
 unsafe impl Send for Db {}
 
+/// Deadlines on (the default). The simulator turns them off: they read
+/// the real clock, so whether one fired would differ from run to run.
+static DEADLINES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn deadlines(on: bool) {
+    DEADLINES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 extern "C" fn progress(arg: *mut c_void) -> c_int {
     // SAFETY: arg is the Db's boxed deadline, alive as long as the Db.
     let deadline = unsafe { *(arg as *const u64) };
-    (deadline != 0 && crate::sys::linux::now_ms() >= deadline) as c_int
+    (deadline != 0 && DEADLINES.load(std::sync::atomic::Ordering::Relaxed) && crate::sys::linux::now_ms() >= deadline) as c_int
 }
 
 fn cstr(s: &str) -> Vec<u8> {
@@ -269,6 +278,20 @@ impl Db {
         self.query(id, args, |_| {})?;
         // SAFETY: a valid handle.
         Ok(unsafe { sqlite3_changes64(self.raw) } as u64)
+    }
+
+    /// How long a statement waits for another connection's write lock
+    /// (5 s by default). The simulator sets 0: its connections take turns
+    /// in one thread, so a wait would only sleep; busy is an answer there.
+    pub fn busy_wait(&mut self, ms: u32) {
+        // SAFETY: a valid handle.
+        unsafe { sqlite3_busy_timeout(self.raw, ms.min(i32::MAX as u32) as c_int) };
+    }
+
+    /// A transaction is open on this connection.
+    pub fn in_transaction(&self) -> bool {
+        // SAFETY: a valid handle.
+        unsafe { sqlite3_get_autocommit(self.raw) == 0 }
     }
 
     pub fn last_rowid(&self) -> i64 {

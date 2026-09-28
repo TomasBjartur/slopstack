@@ -24,7 +24,7 @@ use crate::spec_authz::{Action, Facts};
 use crate::sys::crypto::{p256_verify, sha256};
 use crate::sys::sqlite::{DbErr, Val};
 use crate::webauthn as wa;
-use std::collections::HashMap;
+use crate::hash::{map, Map};
 use std::rc::Rc;
 
 /// An emailed link works once, for 30 minutes; a passkey challenge for 5.
@@ -90,7 +90,7 @@ impl Conf {
 /// Feed pages' main parts by path and query, as of a feed generation.
 /// Bounded: past FEEDS_MAX entries or FEEDS_BYTES, emptied.
 struct FeedCache {
-    map: HashMap<String, (i64, String, Rc<Vec<u8>>)>,
+    map: Map<String, (i64, String, Rc<Vec<u8>>)>,
     bytes: usize,
 }
 
@@ -155,14 +155,14 @@ impl FeedCache {
 /// a draft's document seq), with their word count. Bounded by bytes: past
 /// the budget, entries are dropped until it fits.
 struct PostCache {
-    map: HashMap<u64, (i64, Rc<Markup>, i64)>,
+    map: Map<u64, (i64, Rc<Markup>, i64)>,
     bytes: usize,
     budget: usize,
 }
 
 impl PostCache {
     fn new(budget: usize) -> PostCache {
-        PostCache { map: HashMap::new(), bytes: 0, budget }
+        PostCache { map: map(), bytes: 0, budget }
     }
 
     fn get(&self, id: u64, version: i64) -> Option<(Rc<Markup>, i64)> {
@@ -198,13 +198,13 @@ pub struct Site {
     stmt_stats: bool,
     requests: u64,
     /// Rendered comments by id (COMMENT_CACHE of them at most).
-    comments_md: HashMap<u64, Rc<Markup>>,
+    comments_md: Map<u64, Rc<Markup>>,
     conf: Conf,
     cache: PostCache,
     /// Drafts and previews (the editor's current text), by document seq.
     drafts: PostCache,
     /// Editor page loads this minute, by user (OPENS_PER_MINUTE).
-    opens: HashMap<u64, (u64, u32)>,
+    opens: Map<u64, (u64, u32)>,
     /// Login challenges made this minute (CHALLENGES_PER_MINUTE).
     minute: u64,
     challenges: u32,
@@ -274,7 +274,7 @@ type Res = Result<(), u16>;
 
 impl Site {
     pub fn new(st: Store, conf: Conf, changes: Changes) -> Site {
-        Site { st, docs: crate::docs::Docs::new(), feeds: FeedCache { map: HashMap::new(), bytes: 0 }, stmt_stats: std::env::var("BLOG_STMT_STATS").as_deref() == Ok("1"), requests: 0, comments_md: HashMap::new(), conf, cache: PostCache::new(CACHE_BYTES), drafts: PostCache::new(CACHE_BYTES / 4), opens: HashMap::new(), minute: 0, challenges: 0, swept_ms: 0, changes, waits: Vec::new() }
+        Site { st, docs: crate::docs::Docs::new(), feeds: FeedCache { map: map(), bytes: 0 }, stmt_stats: std::env::var("BLOG_STMT_STATS").as_deref() == Ok("1"), requests: 0, comments_md: map(), conf, cache: PostCache::new(CACHE_BYTES), drafts: PostCache::new(CACHE_BYTES / 4), opens: map(), minute: 0, challenges: 0, swept_ms: 0, changes, waits: Vec::new() }
     }
 
     // RESPONSES
@@ -1210,9 +1210,7 @@ impl Site {
         let now = r.now();
         let blog = p.facts().blog;
         let docs = &mut self.docs;
-        let dest = self
-            .st
-            .write(&p, now, true, |st, _| {
+        let dest = self.st.write(&p, now, true, |st, _| {
                 if let Some(b) = &body {
                     docs.set_text(st, id, b)?;
                 }
@@ -1243,8 +1241,12 @@ impl Site {
                 }
                 st.run(Q::PostPublish, &[Val::Int(id as i64), Val::Text(title.as_bytes()), Val::Text(body.as_bytes()), Val::Int(words as i64), Val::Int(now as i64), Val::Text(slug.as_bytes())])?;
                 Ok(format!("/b/{blog_slug}/{slug}?published=1"))
-            })
-            .map_err(no_code)?;
+            });
+        if dest.is_err() {
+            // (As in sync: the copy may hold what was rolled back.)
+            self.docs.forget(id);
+        }
+        let dest = dest.map_err(no_code)?;
         if body.is_some() {
             self.changes.bump(Kind::Doc, id);
         }
@@ -1322,13 +1324,20 @@ impl Site {
                 return Err(403);
             }
             let docs = &mut self.docs;
-            self.st
-                .write(&p, now, false, |st, _| {
-                    docs.store(st, id, rep, ops)?;
-                    st.run(Q::Edited, &[Val::Int(id as i64), Val::Int(now as i64)])?;
-                    Ok(())
-                })
-                .map_err(no_code)?;
+            let stored = self.st.write(&p, now, false, |st, _| {
+                docs.store(st, id, rep, ops)?;
+                st.run(Q::Edited, &[Val::Int(id as i64), Val::Int(now as i64)])?;
+                Ok(())
+            });
+            if stored.is_err() {
+                // The batch went into this worker's copy of the document,
+                // and the transaction was rolled back: the copy is no
+                // longer the database's. (Else the retry looks like a
+                // repeat, is not stored, and later batches that build on
+                // it are: found by the whole-app simulation.)
+                self.docs.forget(id);
+            }
+            stored.map_err(no_code)?;
         }
         if !ops.is_empty() {
             self.changes.bump(Kind::Doc, id);
@@ -1765,7 +1774,7 @@ fn txn<T>(st: &mut Store, f: impl FnOnce(&mut Store) -> Result<T, u16>) -> Resul
     st.run(Q::Begin, &[]).map_err(db_code)?;
     match f(st) {
         Ok(v) => {
-            st.run(Q::Commit, &[]).map_err(db_code)?;
+            st.commit().map_err(db_code)?;
             Ok(v)
         }
         Err(e) => {
@@ -1826,6 +1835,34 @@ fn json_str(j: &mut String, s: &str) {
 /// no more to come.
 fn nothing_new(body: &[u8]) -> bool {
     body.len() == 10 && body[0] == 0 && body[9] == 0
+}
+
+/// What the site holds in memory, and each part's budget (the
+/// simulator's invariants).
+pub struct Sizes {
+    pub parts: Vec<(&'static str, usize, usize)>,
+}
+
+impl Site {
+    pub fn sizes(&self) -> Sizes {
+        let (docs, docs_max) = self.docs.memory();
+        Sizes {
+            parts: vec![
+                ("documents", docs, docs_max),
+                ("post pages", self.cache.bytes, self.cache.budget),
+                ("drafts", self.drafts.bytes, self.drafts.budget),
+                ("feed pages", self.feeds.bytes, FEEDS_BYTES),
+                ("feed entries", self.feeds.map.len(), FEEDS_MAX),
+                ("rendered comments", self.comments_md.len(), COMMENT_CACHE),
+                ("waiting requests", self.waits.len(), WAITS_MAX),
+            ],
+        }
+    }
+
+    /// The store, for the simulator (to inject faults into).
+    pub fn store(&mut self) -> &mut Store {
+        &mut self.st
+    }
 }
 
 impl App for Site {

@@ -8,6 +8,8 @@ extern "C" {
     fn Hacl_P256_ecdsa_verif_p256_sha2(msg_len: c_uint, msg: *mut u8, public_key: *mut u8, r: *mut u8, s: *mut u8) -> bool;
     fn Hacl_P256_uncompressed_to_raw(pk: *mut u8, pk_raw: *mut u8) -> bool;
     fn Hacl_P256_validate_public_key(pk: *mut u8) -> bool;
+    fn Hacl_P256_ecdsa_sign_p256_sha2(signature: *mut u8, msg_len: c_uint, msg: *mut u8, private_key: *mut u8, nonce: *mut u8) -> bool;
+    fn Hacl_P256_dh_initiator(public_key: *mut u8, private_key: *mut u8) -> bool;
 }
 
 /// SHA-256 of data (at most 4 GiB).
@@ -33,6 +35,31 @@ pub fn p256_verify(public_key: &[u8; 64], msg: &[u8], der_sig: &[u8]) -> bool {
     // SAFETY: pk is 64 bytes, r and s 32 each, msg valid for its length;
     // HACL* checks the key is a valid point and 0 < r, s < n.
     unsafe { Hacl_P256_ecdsa_verif_p256_sha2(msg.len() as c_uint, msg.as_ptr() as *mut u8, pk.as_mut_ptr(), r.as_mut_ptr(), s.as_mut_ptr()) }
+}
+
+// THE SIMULATED AUTHENTICATOR's side (src/tests/appsim: simulated users
+// make passkeys and sign in with them). Not used by the server.
+
+/// The public key (x || y) of a private key; None unless 0 < key < n.
+pub fn p256_public(private_key: &[u8; 32]) -> Option<[u8; 64]> {
+    let mut k = *private_key;
+    let mut pk = [0u8; 64];
+    // SAFETY: 64 and 32 bytes, as documented; HACL* checks the key's range.
+    if unsafe { Hacl_P256_dh_initiator(pk.as_mut_ptr(), k.as_mut_ptr()) } { Some(pk) } else { None }
+}
+
+/// An ECDSA P-256 signature (r || s) over SHA-256(msg); None unless the key
+/// and nonce are in range. The nonce must be secret and never reused (the
+/// simulator's users are not real: theirs come from the seed).
+pub fn p256_sign(private_key: &[u8; 32], nonce: &[u8; 32], msg: &[u8]) -> Option<[u8; 64]> {
+    if msg.len() > u32::MAX as usize {
+        return None;
+    }
+    let (mut k, mut n) = (*private_key, *nonce);
+    let mut sig = [0u8; 64];
+    // SAFETY: 64, 32 and 32 bytes, msg valid for its length, as documented.
+    let ok = unsafe { Hacl_P256_ecdsa_sign_p256_sha2(sig.as_mut_ptr(), msg.len() as c_uint, msg.as_ptr() as *mut u8, k.as_mut_ptr(), n.as_mut_ptr()) };
+    if ok { Some(sig) } else { None }
 }
 
 /// A 65-byte uncompressed point (04 || x || y) to x || y; None unless it

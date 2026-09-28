@@ -19,7 +19,6 @@
 use crate::crdt::{self, Doc, Op};
 use crate::db::{No, Q, Store};
 use crate::sys::sqlite::Val;
-use std::collections::HashMap;
 
 pub const BATCH_MAX: usize = 16 << 20;
 pub const LOG_MAX: i64 = 1 << 30;
@@ -36,7 +35,7 @@ struct Loaded {
 }
 
 pub struct Docs {
-    map: HashMap<u64, Loaded>,
+    map: crate::hash::Map<u64, Loaded>,
     tick: u64,
 }
 
@@ -48,7 +47,7 @@ impl Default for Docs {
 
 impl Docs {
     pub fn new() -> Docs {
-        Docs { map: HashMap::new(), tick: 0 }
+        Docs { map: crate::hash::map(), tick: 0 }
     }
 
     pub fn forget(&mut self, post: u64) {
@@ -85,6 +84,12 @@ impl Docs {
             }
         }
         Ok(&mut self.map.get_mut(&post).expect("loaded").doc)
+    }
+
+    /// Memory held (bytes, roughly) and its budget: for the simulator's
+    /// invariants.
+    pub fn memory(&self) -> (usize, usize) {
+        (self.map.values().map(|l| l.doc.memory()).sum(), CACHE_MAX)
     }
 
     pub fn seq(&self, post: u64) -> i64 {

@@ -35,6 +35,7 @@ pub mod pages;
 pub mod site;
 pub mod docs;
 pub mod notify;
+pub mod hash;
 pub mod sim;
 pub mod tests {
     pub mod crdt;
@@ -43,6 +44,7 @@ pub mod tests {
     pub mod http;
     pub mod markdown;
     pub mod sim;
+    pub mod appsim;
 }
 
 verus! {
@@ -91,6 +93,7 @@ fn run() {
                 }
             }
             "sim" => tests::sim::run(),
+            "appsim" => tests::appsim::run(&args[3..]),
             t => panic!("no test {t}"),
         }
         return;
@@ -107,6 +110,11 @@ fn run() {
     drop(db::Store::open(&path).unwrap_or_else(|e| panic!("cannot open {path}: {e:?}")));
     let listener = sys::linux::listen_loopback(port, 4096).unwrap_or_else(|e| panic!("cannot listen on {port}: errno {e}"));
     eprintln!("listening on 127.0.0.1:{port} ({workers} worker(s))");
+    // Cache keys from the OS (the same in every worker): clients cannot
+    // choose keys that collide.
+    let mut k = [0u8; 16];
+    sys::linux::random(&mut k);
+    hash::set_keys(u64::from_le_bytes(k[..8].try_into().expect("8")), u64::from_le_bytes(k[8..].try_into().expect("8")));
     // What changed, shared by the workers (made before they are forked).
     let changes = notify::Changes::shared();
     if workers == 1 {

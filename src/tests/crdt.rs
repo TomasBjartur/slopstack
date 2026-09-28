@@ -365,6 +365,9 @@ pub fn run() {
 
     perf(&mut check);
     println!("{fails} failure(s)");
+    if fails > 0 {
+        std::process::exit(1);
+    }
 }
 
 // PERFORMANCE at 10x the worst case (DESIGN.md: a 6 MB post; 60 MB here).
