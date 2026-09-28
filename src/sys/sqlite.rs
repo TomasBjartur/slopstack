@@ -144,18 +144,25 @@ pub struct Db {
 // another thread (a helper's reader) is fine.
 unsafe impl Send for Db {}
 
-/// Deadlines on (the default). The simulator turns them off: they read
-/// the real clock, so whether one fired would differ from run to run.
-static DEADLINES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// The clock deadlines read: the real one (u64::MAX), or the simulator's
+/// time, set by it (so a deadline fires, or not, the same way every run).
+static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
-pub fn deadlines(on: bool) {
-    DEADLINES.store(on, std::sync::atomic::Ordering::Relaxed);
+pub fn sim_clock(now: Option<u64>) {
+    CLOCK.store(now.unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn now_ms() -> u64 {
+    match CLOCK.load(std::sync::atomic::Ordering::Relaxed) {
+        u64::MAX => crate::sys::linux::now_ms(),
+        t => t,
+    }
 }
 
 extern "C" fn progress(arg: *mut c_void) -> c_int {
     // SAFETY: arg is the Db's boxed deadline, alive as long as the Db.
     let deadline = unsafe { *(arg as *const u64) };
-    (deadline != 0 && DEADLINES.load(std::sync::atomic::Ordering::Relaxed) && crate::sys::linux::now_ms() >= deadline) as c_int
+    (deadline != 0 && now_ms() >= deadline) as c_int
 }
 
 fn cstr(s: &str) -> Vec<u8> {
@@ -326,7 +333,7 @@ impl Db {
     }
 
     pub fn set_deadline(&mut self, ms: u64) {
-        *self.deadline = if ms == 0 { 0 } else { crate::sys::linux::now_ms() + ms };
+        *self.deadline = if ms == 0 { 0 } else { now_ms() + ms };
     }
 }
 

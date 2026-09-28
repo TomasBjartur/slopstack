@@ -12,25 +12,42 @@ pub struct Req {
     pub ctype: &'static str,
     /// Who sends it (the oracle's X-Sim header: user index).
     pub user: usize,
+    /// Asks to keep the connection (a browser's default); else Connection: close.
+    pub keep: bool,
+    /// Sent by Datastar (the page's script), as a browser's live parts do.
+    pub ds: bool,
 }
 
 impl Req {
     pub fn get(user: usize, path: String, sid: &Option<String>) -> Req {
-        Req { method: "GET", path, sid: sid.clone(), body: vec![], ctype: "", user }
+        Req { method: "GET", path, sid: sid.clone(), body: vec![], ctype: "", user, keep: false, ds: false }
+    }
+
+    /// Another method, without a body (HEAD, PUT...).
+    pub fn method(method: &'static str, user: usize, path: String, sid: &Option<String>) -> Req {
+        Req { method, path, sid: sid.clone(), body: vec![], ctype: "", user, keep: false, ds: false }
+    }
+
+    pub fn datastar(mut self, on: bool) -> Req {
+        self.ds = on;
+        self
     }
 
     pub fn form(user: usize, path: String, sid: &Option<String>, fields: &[(&str, &str)]) -> Req {
-        Req { method: "POST", path, sid: sid.clone(), body: form(fields).into_bytes(), ctype: "application/x-www-form-urlencoded", user }
+        Req { method: "POST", path, sid: sid.clone(), body: form(fields).into_bytes(), ctype: "application/x-www-form-urlencoded", user, keep: false, ds: false }
     }
 
     pub fn bytes(user: usize, path: String, sid: &Option<String>, body: Vec<u8>) -> Req {
-        Req { method: "POST", path, sid: sid.clone(), body, ctype: "application/octet-stream", user }
+        Req { method: "POST", path, sid: sid.clone(), body, ctype: "application/octet-stream", user, keep: false, ds: false }
     }
 
     pub fn wire(&self) -> Vec<u8> {
-        let mut h = format!("{} {} HTTP/1.1\r\nHost: sim\r\nConnection: close\r\nX-Sim: {}\r\n", self.method, self.path, self.user);
+        let mut h = format!("{} {} HTTP/1.1\r\nHost: sim\r\n{}X-Sim: {}\r\n", self.method, self.path, if self.keep { "" } else { "Connection: close\r\n" }, self.user);
         if let Some(s) = &self.sid {
             h.push_str(&format!("Cookie: sid={s}\r\n"));
+        }
+        if self.ds {
+            h.push_str("Datastar-Request: true\r\n");
         }
         if self.method == "POST" {
             h.push_str(&format!("Sec-Fetch-Site: same-origin\r\nContent-Type: {}\r\nContent-Length: {}\r\n", self.ctype, self.body.len()));
@@ -61,10 +78,58 @@ pub fn form(fields: &[(&str, &str)]) -> String {
     s
 }
 
+/// Character references in an attribute: the named ones pages write, and
+/// numeric ones.
+fn decode(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let r = &rest[i..];
+        let (c, n) = if let Some(e) = r.find(';').filter(|&e| e < 12) {
+            let name = &r[1..e];
+            let c = match name {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "#39" | "apos" => Some('\''),
+                _ if name.starts_with("#x") => u32::from_str_radix(&name[2..], 16).ok().and_then(char::from_u32),
+                _ if name.starts_with('#') => name[1..].parse().ok().and_then(char::from_u32),
+                _ => None,
+            };
+            (c, e + 1)
+        } else {
+            (None, 1)
+        };
+        match c {
+            Some(c) => out.push(c),
+            None => out.push_str(&r[..n]),
+        }
+        rest = &r[n..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub struct Resp {
     pub status: u16,
     pub head: String,
     pub body: Vec<u8>,
+}
+
+/// The length of a whole response at the start of b (its head and its
+/// Content-Length of body), once it has all arrived.
+pub fn whole(b: &[u8], head_only: bool) -> Option<usize> {
+    let e = b.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&b[..e]).ok()?;
+    let n: usize = head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        if k.eq_ignore_ascii_case("content-length") { v.trim().parse().ok() } else { None }
+    })?;
+    // (An answer to HEAD says its length and sends no body.)
+    let n = if head_only { 0 } else { n };
+    if b.len() >= e + 4 + n { Some(e + 4 + n) } else { None }
 }
 
 impl Resp {
@@ -76,7 +141,7 @@ impl Resp {
         let body = b[e + 4..].to_vec();
         let r = Resp { status, head, body };
         match r.header("content-length").and_then(|v| v.parse::<usize>().ok()) {
-            Some(n) if n != r.body.len() => None,
+            Some(n) if n != r.body.len() && !r.body.is_empty() => None,
             _ => Some(r),
         }
     }
@@ -100,22 +165,222 @@ impl Resp {
         String::from_utf8_lossy(&self.body).to_string()
     }
 
-    /// The value of attribute name="..." (first), in an HTML body.
-    pub fn attr(&self, name: &str) -> Option<String> {
+    /// An attribute of the element with this id, as a browser reads it:
+    /// the element's start tag parsed into its attributes, character
+    /// references decoded. None if there is no such element or attribute.
+    pub fn attr(&self, id: &str, name: &str) -> Option<String> {
         let t = self.text();
-        let k = format!("{name}=\"");
-        let i = t.find(&k)? + k.len();
-        let j = t[i..].find('"')? + i;
-        Some(t[i..j].to_string())
+        let at = t.find(&format!(" id=\"{id}\""))?;
+        let start = t[..at].rfind('<')?;
+        let end = at + t[at..].find('>')?;
+        let tag = &t[start + 1..end];
+        // name="value" pairs after the element's name.
+        let mut rest = tag.split_once(|c: char| c.is_whitespace())?.1;
+        loop {
+            rest = rest.trim_start();
+            if rest.is_empty() || rest == "/" {
+                return None;
+            }
+            let n = rest.find(|c: char| c == '=' || c.is_whitespace()).unwrap_or(rest.len());
+            let (k, after) = rest.split_at(n);
+            let (v, next) = match after.strip_prefix("=\"") {
+                Some(a) => {
+                    let e = a.find('"')?;
+                    (Some(&a[..e]), &a[e + 1..])
+                }
+                None => (None, after),
+            };
+            if k == name {
+                return Some(decode(v.unwrap_or("")));
+            }
+            rest = next;
+        }
     }
 
-    /// A JSON string field (the passkey options: flat, no escapes needed).
+    /// A string field of a JSON object answer, read as a browser's
+    /// JSON.parse would: the whole body must be valid JSON.
     pub fn json(&self, key: &str) -> Option<String> {
-        let t = self.text();
-        let k = format!("\"{key}\":\"");
-        let i = t.find(&k)? + k.len();
-        let j = t[i..].find('"')? + i;
-        Some(t[i..j].to_string())
+        match parse_json(&self.body)? {
+            Json::Obj(fields) => fields.into_iter().find(|(k, _)| k == key).and_then(|(_, v)| if let Json::Str(s) = v { Some(s) } else { None }),
+            _ => None,
+        }
+    }
+}
+
+// STRICT JSON (RFC 8259, as JSON.parse reads it).
+pub enum Json {
+    Null,
+    Bool(bool),
+    Num(f64),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+}
+
+/// The whole text as one JSON value (whitespace around it), or None.
+pub fn parse_json(b: &[u8]) -> Option<Json> {
+    let mut i = 0;
+    let v = value(b, &mut i, 0)?;
+    ws(b, &mut i);
+    if i == b.len() { Some(v) } else { None }
+}
+
+fn ws(b: &[u8], i: &mut usize) {
+    while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r') {
+        *i += 1;
+    }
+}
+
+fn value(b: &[u8], i: &mut usize, depth: usize) -> Option<Json> {
+    if depth > 64 {
+        return None;
+    }
+    ws(b, i);
+    match *b.get(*i)? {
+        b'{' => {
+            *i += 1;
+            let mut f = vec![];
+            ws(b, i);
+            if b.get(*i) == Some(&b'}') {
+                *i += 1;
+                return Some(Json::Obj(f));
+            }
+            loop {
+                ws(b, i);
+                let Json::Str(k) = string(b, i)? else { return None };
+                ws(b, i);
+                if b.get(*i) != Some(&b':') {
+                    return None;
+                }
+                *i += 1;
+                f.push((k, value(b, i, depth + 1)?));
+                ws(b, i);
+                match b.get(*i)? {
+                    b',' => *i += 1,
+                    b'}' => {
+                        *i += 1;
+                        return Some(Json::Obj(f));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        b'[' => {
+            *i += 1;
+            let mut a = vec![];
+            ws(b, i);
+            if b.get(*i) == Some(&b']') {
+                *i += 1;
+                return Some(Json::Arr(a));
+            }
+            loop {
+                a.push(value(b, i, depth + 1)?);
+                ws(b, i);
+                match b.get(*i)? {
+                    b',' => *i += 1,
+                    b']' => {
+                        *i += 1;
+                        return Some(Json::Arr(a));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        b'"' => string(b, i),
+        b't' if b[*i..].starts_with(b"true") => {
+            *i += 4;
+            Some(Json::Bool(true))
+        }
+        b'f' if b[*i..].starts_with(b"false") => {
+            *i += 5;
+            Some(Json::Bool(false))
+        }
+        b'n' if b[*i..].starts_with(b"null") => {
+            *i += 4;
+            Some(Json::Null)
+        }
+        b'-' | b'0'..=b'9' => {
+            let s = *i;
+            if b[*i] == b'-' {
+                *i += 1;
+            }
+            let digits = |b: &[u8], i: &mut usize| {
+                let s = *i;
+                while *i < b.len() && b[*i].is_ascii_digit() {
+                    *i += 1;
+                }
+                *i > s
+            };
+            if b.get(*i) == Some(&b'0') {
+                *i += 1;
+            } else if !digits(b, i) {
+                return None;
+            }
+            if b.get(*i) == Some(&b'.') {
+                *i += 1;
+                if !digits(b, i) {
+                    return None;
+                }
+            }
+            if matches!(b.get(*i), Some(b'e' | b'E')) {
+                *i += 1;
+                if matches!(b.get(*i), Some(b'+' | b'-')) {
+                    *i += 1;
+                }
+                if !digits(b, i) {
+                    return None;
+                }
+            }
+            std::str::from_utf8(&b[s..*i]).ok()?.parse().ok().map(Json::Num)
+        }
+        _ => None,
+    }
+}
+
+fn string(b: &[u8], i: &mut usize) -> Option<Json> {
+    if b.get(*i) != Some(&b'"') {
+        return None;
+    }
+    *i += 1;
+    let mut out: Vec<u16> = vec![];
+    let mut raw: Vec<u8> = vec![];
+    let flush = |raw: &mut Vec<u8>, out: &mut Vec<u16>| -> Option<()> {
+        out.extend(std::str::from_utf8(raw).ok()?.encode_utf16());
+        raw.clear();
+        Some(())
+    };
+    loop {
+        let c = *b.get(*i)?;
+        *i += 1;
+        match c {
+            b'"' => {
+                flush(&mut raw, &mut out)?;
+                return String::from_utf16(&out).ok().map(Json::Str);
+            }
+            b'\\' => {
+                flush(&mut raw, &mut out)?;
+                let e = *b.get(*i)?;
+                *i += 1;
+                match e {
+                    b'"' => out.push(b'"' as u16),
+                    b'\\' => out.push(b'\\' as u16),
+                    b'/' => out.push(b'/' as u16),
+                    b'b' => out.push(8),
+                    b'f' => out.push(12),
+                    b'n' => out.push(10),
+                    b'r' => out.push(13),
+                    b't' => out.push(9),
+                    b'u' => {
+                        let h = std::str::from_utf8(b.get(*i..*i + 4)?).ok()?;
+                        out.push(u16::from_str_radix(h, 16).ok()?);
+                        *i += 4;
+                    }
+                    _ => return None,
+                }
+            }
+            0..=0x1f => return None,
+            _ => raw.push(c),
+        }
     }
 }
 

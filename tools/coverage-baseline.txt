@@ -1,13 +1,13 @@
 # The whole-application simulation's line coverage (%), per file: a ratchet (tools/sim_coverage.py).
-src/site.rs 72.9
-src/docs.rs 75.5
-src/db.rs 91.7
-src/crdt.rs 77.9
-src/server.rs 67.8
+src/site.rs 94.8
+src/docs.rs 92.6
+src/db.rs 93.1
+src/crdt.rs 94.2
+src/server.rs 76.4
 src/notify.rs 81.0
 src/webauthn.rs 81.4
-src/http.rs 79.9
-src/pages.rs 80.5
-src/form.rs 88.2
-src/resp.rs 87.7
-src/authz.rs 77.6
+src/http.rs 94.0
+src/pages.rs 99.0
+src/form.rs 89.2
+src/resp.rs 93.8
+src/authz.rs 78.9

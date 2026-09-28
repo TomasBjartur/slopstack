@@ -76,6 +76,10 @@ pub trait App {
     /// time now_ms): (conn, the whole response). Asked every turn while
     /// any are parked.
     fn ready(&mut self, _now_ms: u64, _answers: &mut Vec<(u64, Vec<u8>)>) {}
+
+    /// A parked request's connection has closed (its client left): it
+    /// will not be answered, and the application can forget it.
+    fn gone(&mut self, _conn: u64) {}
 }
 
 #[derive(Clone, Copy)]
@@ -238,6 +242,16 @@ impl<I: Io, A: App> Server<I, A> {
         (self.small.used() + self.big.used(), PENDING_MAX - self.free_pending.len())
     }
 
+    /// Body buffers held, and connection slots free (for the simulations'
+    /// check that everything comes back once clients are gone).
+    pub fn bodies_in_use(&self) -> usize {
+        self.bodies.len() - self.free_bodies.len()
+    }
+
+    pub fn slots_free(&self) -> usize {
+        self.free_slots.len()
+    }
+
     /// Requests parked now.
     pub fn parked(&self) -> usize {
         self.parked
@@ -312,6 +326,7 @@ impl<I: Io, A: App> Server<I, A> {
         }
         if s.parked {
             self.parked -= 1;
+            self.app.gone((slot as u64) << 32 | s.gen as u64);
         }
         self.slots[slot as usize] = Slot { gen: s.gen, ..FREE_SLOT };
         self.io.close(slot);
@@ -672,6 +687,13 @@ impl<I: Io, A: App> Server<I, A> {
         self.slots[slot as usize].since_ms = self.io.now_ms();
         self.resp.clear();
         self.resp.extend_from_slice(&resp);
+        // An answer that says it closes the connection (an error's) does:
+        // else the client, told so, stops using it, and it stays open idle
+        // (found by the whole-app simulation).
+        let head_end = resp.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(resp.len());
+        if resp[..head_end].windows(19).any(|w| w.eq_ignore_ascii_case(b"connection: close\r\n")) {
+            self.slots[slot as usize].close_after = true;
+        }
         // (Anything sent while it was parked closed it: nothing waits to be read.)
         self.send(slot);
     }

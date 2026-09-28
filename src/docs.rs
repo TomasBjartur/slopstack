@@ -183,10 +183,14 @@ impl Docs {
     /// then for kind 1 the snapshot's length (u32) and bytes, then the
     /// batches' operations one after another. Batches stored by replica
     /// `mine` (the asker's own: it has them) are left out, not stopped at.
-    pub fn reply(&mut self, st: &mut Store, post: u64, since: i64, mine: u32, out: &mut Vec<u8>) -> Result<(), No> {
+    /// A snapshot is sent only to a client that says it has nothing yet
+    /// (`load`): one that has loaded an empty document also has since 0,
+    /// and a snapshot would replace its document, and its own edits not
+    /// yet stored with it (found by the whole-app simulation).
+    pub fn reply(&mut self, st: &mut Store, post: u64, since: i64, mine: u32, load: bool, out: &mut Vec<u8>) -> Result<(), No> {
         self.get(st, post)?;
         let mut snap: Option<(i64, Vec<u8>)> = None;
-        if since == 0 {
+        if since == 0 && load {
             st.q(Q::SnapGet, &[Val::Int(post as i64)], |r| snap = Some((r.int(0), r.bytes(1).to_vec())))?;
         }
         let mut from = since;

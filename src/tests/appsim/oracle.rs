@@ -16,7 +16,12 @@
 //   - every rendered post or comment body is allowed markup (an
 //     independent checker of spec/markup.rs's law: tested, not proved);
 //   - no page shows someone signed in whose session has ended by the wall
-//     clock.
+//     clock;
+//   - THE OTHER SIDE: what the law permits succeeds. A request the law
+//     allows (on the facts read here), that no injected fault touched,
+//     is answered with success; the only refusals allowed are the limits
+//     (the write budget, editor page loads a minute: 429) and a taken
+//     address (409). A server that refuses everything fails here.
 use super::Shared;
 use super::law::permits;
 use crate::server::{App, Ctx, Request};
@@ -54,6 +59,17 @@ pub enum P {
     Members,
     MyComments,
     PostSlug,
+    Budget,
+    PostComments,
+    Mail,
+    Traced,
+    BadCounts,
+    MailFlood,
+    ImageExists,
+    RepOwner,
+    FeedAll,
+    FeedBlog,
+    FeedAuthor,
     AllPosts,
     AllComments,
     AllBlogs,
@@ -74,7 +90,7 @@ const SQL: &[&str] = &[
        (SELECT count(*) || ':' || coalesce(sum(id + published * 3 + updated_ms % 1000003 + length(body_md)), 0) FROM post) || '|' || \
        (SELECT coalesce(max(seq), 0) FROM doc_ops) || '|' || \
        (SELECT count(*) || ':' || coalesce(sum(deleted), 0) FROM comment) || '|' || \
-       (SELECT count(*) FROM post_like)",
+       (SELECT count(*) FROM post_like) || '|' || (SELECT count(*) FROM image)",
     "SELECT min(x) FROM (SELECT min(created_ms) AS x FROM user UNION ALL SELECT min(created_ms) FROM blog \
        UNION ALL SELECT min(updated_ms) FROM post UNION ALL SELECT min(created_ms) FROM comment \
        UNION ALL SELECT min(created_ms) FROM session UNION ALL SELECT min(expires_ms) FROM session)",
@@ -86,6 +102,18 @@ const SQL: &[&str] = &[
     "SELECT user_id, role FROM member WHERE blog_id = ?1 ORDER BY user_id",
     "SELECT id FROM comment WHERE author_id = ?1 AND deleted = 0 ORDER BY id",
     "SELECT b.slug, p.slug FROM post p JOIN blog b ON b.id = p.blog_id WHERE p.id = ?1",
+    "SELECT n FROM write_budget WHERE user_id = ?1 AND window_ms > ?2 - 60000",
+    "SELECT id FROM comment WHERE post_id = ?1 AND deleted = 0 ORDER BY id",
+    "SELECT body FROM outbox WHERE to_email = ?1 ORDER BY id DESC LIMIT 1",
+    "SELECT count(*) FROM doc_ops WHERE instr(data, cast(?1 AS blob)) > 0",
+    "SELECT count(*) FROM post p WHERE p.like_count != (SELECT count(*) FROM post_like l WHERE l.post_id = p.id) \
+       OR p.comment_count != (SELECT count(*) FROM comment c WHERE c.post_id = p.id AND c.deleted = 0)",
+    "SELECT count(*) FROM outbox a WHERE (SELECT count(*) FROM outbox b WHERE b.to_email = a.to_email AND b.created_ms > a.created_ms - 3600000 AND b.created_ms <= a.created_ms) > 3",
+    "SELECT count(*) FROM image WHERE key = ?1",
+    "SELECT user_id FROM doc_rep WHERE post_id = ?1 AND rep = ?2",
+    "SELECT id, published_ms FROM post WHERE published = 1 ORDER BY published_ms DESC",
+    "SELECT p.id, p.published_ms FROM post p JOIN blog b ON b.id = p.blog_id WHERE b.slug = ?1 AND p.published = 1 ORDER BY p.published_ms DESC",
+    "SELECT p.id, p.published_ms FROM post p JOIN user u ON u.id = p.author_id WHERE u.handle = ?1 AND p.published = 1 ORDER BY p.published_ms DESC",
     "SELECT p.id, b.slug, p.slug FROM post p JOIN blog b ON b.id = p.blog_id ORDER BY p.id",
     "SELECT id FROM comment ORDER BY id",
     "SELECT id, slug FROM blog ORDER BY id",
@@ -163,6 +191,11 @@ impl Probe {
     /// The server's text of a post, from its snapshot and stored batches,
     /// applied by the CRDT here (not the site's cache).
     pub fn doc_text(&mut self, post: u64) -> Result<String, String> {
+        self.doc(post).map(|d| d.text())
+    }
+
+    /// The post's document as stored.
+    pub fn doc(&mut self, post: u64) -> Result<crate::crdt::Doc, String> {
         let mut snap = None;
         self.q(P::Snap, &[Val::Int(post as i64)], |r| snap = Some((r.int(0), r.bytes(1).to_vec())));
         let (upto, mut doc) = match snap {
@@ -174,7 +207,7 @@ impl Probe {
         for b in batches {
             doc.apply_batch(&b, &mut ()).map_err(|e| format!("batch: {e:?}"))?;
         }
-        Ok(doc.text())
+        Ok(doc)
     }
 }
 
@@ -360,18 +393,186 @@ struct Asked {
     /// The post the request is about (0: none).
     post: u64,
     dash: bool,
+    /// A feed page: which (all, a blog's, an author's), its key, the page.
+    feed: Option<(P, String, u64)>,
+    /// A form that replaces a post's text (the editor without
+    /// JavaScript): the post, the text, and the tokens in the text before.
+    replace: Option<(u64, String, Vec<String>)>,
+    /// An image asked for, by its key.
+    image: Option<String>,
+    /// When it was parked (monotonic), for a wait: push, not polling; and
+    /// the waiting page's replica (its own changes do not wake it).
+    parked_at: u64,
+    doc_wait: bool,
+    me: u32,
+}
+
+/// A batch well-formed by the wire format's own rules (src/crdt.rs's
+/// comment, read here, not its checking code): runs of at least one
+/// character with ids that fit in u32, deletes of at least one, replicas
+/// and counters not 0, sides 0 or 1.
+fn well_formed(ops: &[u8]) -> bool {
+    let u = |i: usize| ops.get(i..i + 4).map(|b| u32::from_le_bytes(b.try_into().expect("4")) as u64);
+    let mut i = 0;
+    while i < ops.len() {
+        match ops[i] {
+            1 => {
+                let (Some(rep), Some(ctr), Some(_pr), Some(_pc), Some(&side), Some(n)) = (u(i + 1), u(i + 5), u(i + 9), u(i + 13), ops.get(i + 17), u(i + 18)) else { return false };
+                let Some(text) = ops.get(i + 22..i + 22 + n as usize).and_then(|t| std::str::from_utf8(t).ok()) else { return false };
+                let chars = text.chars().count() as u64;
+                if rep == 0 || ctr == 0 || side > 1 || chars == 0 || ctr + chars - 1 > u32::MAX as u64 {
+                    return false;
+                }
+                i += 22 + n as usize;
+            }
+            2 => {
+                let (Some(rep), Some(ctr), Some(len)) = (u(i + 1), u(i + 5), u(i + 9)) else { return false };
+                if rep == 0 || ctr == 0 || len == 0 || ctr + len - 1 > u32::MAX as u64 {
+                    return false;
+                }
+                i += 13;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// An image, by its first bytes: PNG, JPEG, GIF, WebP (read here, not by
+/// the server's check).
+fn is_image(b: &[u8]) -> bool {
+    b.starts_with(b"\x89PNG\r\n\x1a\n") || b.starts_with(b"\xff\xd8\xff") || b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") || (b.len() >= 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP")
+}
+
+/// A post's own address: 1 to 80 of a-z 0-9 -, not "draft-" (the schema's
+/// and the form's rule, read here).
+fn slug_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 80 && !s.starts_with("draft-") && s.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+/// A feed page must show exactly the published posts of its place in the
+/// order (newest first, PAGE_ITEMS a page); posts published in the same
+/// millisecond at the page's edges may fall on either side.
+fn feed_ok(sh: &mut Shared, which: P, key: &str, page: u64, body: &[u8]) -> Result<(), String> {
+    const PAGE_ITEMS: usize = 20;
+    let mut all: Vec<(u64, i64)> = vec![];
+    let args: Vec<Val> = if key.is_empty() { vec![] } else { vec![Val::Text(key.as_bytes())] };
+    sh.probe.q(which, &args, |r| all.push((r.int(0) as u64, r.int(1))));
+    // The posts shown: by their links (href="/b/<blog>/<post>").
+    let text = String::from_utf8_lossy(body);
+    let mut shown: Vec<u64> = vec![];
+    for part in text.split("href=\"/b/").skip(1) {
+        let link = &part[..part.find('"').unwrap_or(0)];
+        let Some((b, s)) = link.split_once('/') else { continue };
+        let s = s.split('#').next().unwrap_or(s);
+        match sh.probe.int(P::PostBySlug, &[Val::Text(b.as_bytes()), Val::Text(s.as_bytes())]) {
+            Some(pid) => {
+                if !shown.contains(&(pid as u64)) {
+                    shown.push(pid as u64);
+                }
+            }
+            // (A post page's own links, to its blog, are not posts.)
+            None if !s.is_empty() => return Err(format!("page {page} links to a post that is not there: /b/{b}/{s}")),
+            None => {}
+        }
+    }
+    let from = (page as usize - 1) * PAGE_ITEMS;
+    let want = all.len().saturating_sub(from).min(PAGE_ITEMS);
+    if shown.len() != want {
+        return Err(format!("page {page} shows {} posts, not {want} (of {} published)", shown.len(), all.len()));
+    }
+    if want == 0 {
+        return Ok(());
+    }
+    let (hi, lo) = (all[from].1, all[from + want - 1].1);
+    for &pid in &shown {
+        match all.iter().find(|(p, _)| *p == pid) {
+            None => return Err(format!("page {page} shows post {pid}, which is not published here")),
+            Some(&(_, t)) if t > hi || t < lo => return Err(format!("page {page} shows post {pid}, published outside this page's place")),
+            _ => {}
+        }
+    }
+    for &(pid, t) in &all {
+        if t < hi && t > lo && !shown.contains(&pid) {
+            return Err(format!("page {page} leaves out post {pid}, which belongs on it"));
+        }
+    }
+    Ok(())
 }
 
 pub struct Checked {
     pub site: Site,
     sh: Rc<RefCell<Shared>>,
     parked: crate::hash::Map<u64, Asked>,
+    injected: Rc<std::cell::Cell<u64>>,
 }
 
 impl Checked {
-    pub fn new(site: Site, sh: Rc<RefCell<Shared>>) -> Checked {
-        Checked { site, sh, parked: crate::hash::map() }
+    pub fn new(site: Site, sh: Rc<RefCell<Shared>>, injected: Rc<std::cell::Cell<u64>>) -> Checked {
+        Checked { site, sh, parked: crate::hash::map(), injected }
     }
+}
+
+/// Whether a sync body's operations decode (a malformed batch is refused
+/// whole: 400 is right for it).
+fn decodes(ops: &[u8]) -> bool {
+    let mut i = 0;
+    while i < ops.len() {
+        match crate::crdt::decode(ops, i) {
+            Ok((_, n)) => i = n,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// What a request the law permits must get: (the action, its facts, the
+/// refusals still allowed).
+fn expected(pr: &mut Probe, who: u64, method: &[u8], parts: &[&str], form: &crate::form::Form, body: &[u8]) -> Option<(Action, Facts, &'static [u16])> {
+    if method == b"POST" {
+        let (a, f) = action(pr, who, method, parts, form, body.len())?;
+        let ok: &'static [u16] = match parts {
+            ["blogs"] => &[409, 429],
+            // (Syncing is not budgeted; a batch over the log's limit is 409;
+            // one that is not operations at all, 400.)
+            ["edit", _, "sync"] if !decodes(body.get(12..).unwrap_or(b"")) => &[400, 409],
+            ["edit", _, "sync"] => &[409],
+            _ => &[429],
+        };
+        return Some((a, f, ok));
+    }
+    let id = |s: &str| num(s);
+    Some(match parts {
+        ["b", b, s] => {
+            let p = pr.int(P::PostBySlug, &[Val::Text(b.as_bytes()), Val::Text(s.as_bytes())]).unwrap_or(0) as u64;
+            if p == 0 {
+                return None;
+            }
+            (Action::ReadPost { post: p }, pr.facts(who, 0, p), &[])
+        }
+        ["edit", i] => (Action::EditPost { post: id(i) }, pr.facts(who, 0, id(i)), &[429]),
+        ["edit", i, "preview"] => (Action::EditPost { post: id(i) }, pr.facts(who, 0, id(i)), &[]),
+        // (Comments are a published post's: a draft has none to show.)
+        ["live", i] | ["comments", i] => {
+            let f = pr.facts(who, 0, id(i));
+            if !f.post.as_ref().is_some_and(|p| p.published) {
+                return None;
+            }
+            (Action::ReadPost { post: id(i) }, f, &[])
+        }
+        ["dash"] if who != 0 => (Action::CreateBlog, pr.facts(who, 0, 0), &[]),
+        // (The reply page: signed in, a comment of a published post.)
+        ["reply", c] if who != 0 => {
+            let mut post = 0;
+            pr.q(P::CommentOf, &[Val::Int(id(c) as i64)], |r| post = r.int(0) as u64);
+            let f = pr.facts(who, 0, post);
+            if post == 0 || !f.post.as_ref().is_some_and(|p| p.published) {
+                return None;
+            }
+            (Action::ReadPost { post }, f, &[])
+        }
+        _ => return None,
+    })
 }
 
 fn num(s: &str) -> u64 {
@@ -412,6 +613,7 @@ fn action(pr: &mut Probe, who: u64, method: &[u8], parts: &[&str], form: &crate:
         ["edit", id, "publish" | "unpublish"] => (Action::PublishPost { post: num(id) }, pr.facts(who, 0, num(id))),
         ["edit", id, "delete"] => (Action::DeletePost { post: num(id) }, pr.facts(who, 0, num(id))),
         ["edit", id, "sync"] if body_len > 12 => (Action::EditPost { post: num(id) }, pr.facts(who, 0, num(id))),
+        ["upload", id] => (Action::EditPost { post: num(id) }, pr.facts(who, 0, num(id))),
         ["comment", id] => (Action::Comment { post: num(id) }, pr.facts(who, 0, num(id))),
         ["comment", id, "delete"] => {
             let mut c = (0, 0);
@@ -430,7 +632,8 @@ impl App for Checked {
         let parts: Vec<&str> = path.split('/').skip(1).collect();
         let user = req.header(b"x-sim").and_then(|v| std::str::from_utf8(v).ok()?.parse().ok()).unwrap_or(usize::MAX);
         let sid = req.header(b"cookie").and_then(|c| c.windows(4).position(|w| w == b"sid=").map(|i| &c[i + 4..(i + 68).min(c.len())]));
-        let (asked, act, before) = {
+        let faults = self.injected.get();
+        let (asked, act, before, expect) = {
             let mut sh = self.sh.borrow_mut();
             let pr = &mut sh.probe;
             let who = pr.who(sid, cx.now_ms);
@@ -442,17 +645,165 @@ impl App for Checked {
             let form = crate::form::Form::parse(req.body).unwrap_or_else(|| crate::form::Form::parse(b"").expect("empty form"));
             let act = action(pr, who, req.method, &parts, &form, req.body.len());
             let before = act.as_ref().map(|_| pr.text(P::Fingerprint, &[]));
+            let expect = expected(pr, who, req.method, &parts, &form, req.body).filter(|(a, f, _)| permits(f, *a));
             let what = format!("{} {}", String::from_utf8_lossy(req.method), target);
-            (Asked { user, who, what, post, dash: req.method == b"GET" && parts == ["dash"] }, act, before)
+            let page = crate::form::Form::parse(target.split_once('?').map_or("", |x| x.1).as_bytes()).and_then(|q| q.num("page")).unwrap_or(1).clamp(1, 500);
+            let feed = match (req.method, parts.as_slice()) {
+                (b"GET", [""]) => Some((P::FeedAll, String::new(), page)),
+                (b"GET", ["b", b]) => Some((P::FeedBlog, b.to_string(), page)),
+                (b"GET", ["u", h]) => Some((P::FeedAuthor, h.to_string(), page)),
+                _ => None,
+            };
+            let replace = match parts.as_slice() {
+                ["edit", id] if req.method == b"POST" => form.get("body").map(|b| {
+                    let before = pr.doc_text(num(id)).unwrap_or_default();
+                    (num(id), b.replace("\r\n", "\n"), tokens(before.as_bytes()).into_iter().map(|t| t.2).collect())
+                }),
+                _ => None,
+            };
+            let image = match parts.as_slice() {
+                ["img", k] if req.method == b"GET" => Some(k.to_string()),
+                _ => None,
+            };
+            (Asked { user, who, what, post, dash: req.method == b"GET" && parts == ["dash"], feed, replace, image, parked_at: cx.mono_ms, doc_wait: parts.len() == 3 && parts[2] == "sync", me: crate::form::Form::parse(target.split_once('?').map_or("", |x| x.1).as_bytes()).and_then(|q| q.num("me")).unwrap_or(0) as u32 }, act, before, expect)
         };
         let keep = self.site.handle(req, cx, out);
         {
             let mut sh = self.sh.borrow_mut();
+            let status = out.get(9..12).unwrap_or(b"000");
+            // Not a path: 400.
+            if (!req.target.is_ascii() || !req.target.starts_with(b"/")) && status != b"400" {
+                sh.violation(asked.user, &asked.what, format!("a target that is not a path, answered {}", String::from_utf8_lossy(status)));
+            }
+            match parts.as_slice() {
+                // A stored batch is well-formed (by the oracle's reading).
+                ["edit", _, "sync"] if req.body.len() > 12 && status == b"200" && !well_formed(&req.body[12..]) => {
+                    sh.violation(asked.user, &asked.what, "a malformed batch stored (the wire format's rules)".into());
+                }
+                // Only images are stored as images.
+                ["upload", _] if status == b"200" && !is_image(req.body) => {
+                    sh.violation(asked.user, &asked.what, "bytes that are not an image stored as one".into());
+                }
+                // A post's address, if given, is refused unless it is one.
+                ["dash", _, "posts"] if req.method == b"POST" => {
+                    let form = crate::form::Form::parse(req.body);
+                    if let Some(s) = form.as_ref().and_then(|f| f.get("slug")).map(str::trim).filter(|s| !s.is_empty()) {
+                        // (Refused by the form's check, or earlier: not signed in,
+                        // no such blog. Not by the database, not accepted.)
+                        if !slug_ok(s) && !matches!(status, b"400" | b"403" | b"404") {
+                            sh.violation(asked.user, &asked.what, format!("a post address {s:?} that is not one, answered {}", String::from_utf8_lossy(status)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // An uploaded image, still there, is served.
+            if let Some(k) = asked.image.as_ref().filter(|k| sh.images.contains_key(*k)) {
+                if status != b"200" && self.injected.get() == faults && sh.probe.int(P::ImageExists, &[Val::Text(k.as_bytes())]) == Some(1) {
+                    sh.violation(asked.user, &asked.what, format!("an image that was uploaded (and is still there) answered {}", String::from_utf8_lossy(status)));
+                }
+            }
+        }
+        if let Ok(t) = std::env::var("APPSIM_TRACE") {
+            if find(req.body, t.as_bytes()).is_some() || find(out, t.as_bytes()).is_some() {
+                let stored = self.sh.borrow_mut().probe.int(P::Traced, &[Val::Text(t.as_bytes())]).unwrap_or(0);
+                eprintln!("TRACE t={} conn {:x} {} {}: answer {} (park {}), faults during {}, batches holding it now {}", self.sh.borrow().now, cx.conn, String::from_utf8_lossy(req.method), target, String::from_utf8_lossy(out.get(9..12).unwrap_or(b"?")), cx.park, self.injected.get() - faults, stored);
+            }
+        }
+        // A sync that stored operations: what they typed is acknowledged
+        // now (when the server stores it, not when the client hears); and
+        // the change, when, by which replica (waits on the post must wake).
+        if let (["edit", id, "sync"], true) = (parts.as_slice(), req.body.len() > 12 && out.get(9..12) == Some(b"200")) {
+            let pid = num(id);
+            let mut sh = self.sh.borrow_mut();
+
+            if let Some(pnum) = sh.pnum(pid) {
+                for (k, _, t) in tokens(&req.body[12..]) {
+                    if k == b't' {
+                        sh.acked.push((pid, pnum, t));
+                    }
+                }
+            }
+        }
+        {
+            let mut sh = self.sh.borrow_mut();
             if let (Some((a, facts)), Some(before)) = (act, before) {
                 let after = sh.probe.text(P::Fingerprint, &[]);
+                // (A sync that stored something new: waits on the post must wake.)
+                if let (["edit", id, "sync"], true) = (parts.as_slice(), after != before) {
+                    let rep = u32::from_le_bytes(req.body[8..12].try_into().expect("4"));
+                    sh.changed.push((num(id), rep, cx.mono_ms));
+                }
+                // THE WRITE BUDGET (spec/authz.rs): 30 writes in each minute's
+                // window; the windows are fixed, so any 60 seconds overlap two
+                // at most: no more than 60 writes that change content in any
+                // 60 seconds. (Sound whatever the windows; a budget that stops
+                // holding shows past it.)
+                if after != before && !matches!(parts.as_slice(), ["edit", _, "sync"]) && asked.who != 0 {
+                    let t = cx.now_ms;
+                    let times = sh.budget.entry(asked.who).or_default();
+                    times.push(t);
+                    times.retain(|&x| x + 60_000 > t && x <= t);
+                    if times.len() > 60 {
+                        let n = times.len();
+                        sh.violation(asked.user, &asked.what, format!("{n} writes within 60 seconds by user {} (the budget allows 30 a minute: 60 at most across two)", asked.who));
+                    }
+                }
                 if after != before && !permits(&facts, a) {
                     sh.violation(asked.user, &asked.what, format!("changed content the law does not permit ({:?} by user {}, facts {:?})", DebugAction(a), asked.who, DebugFacts(facts)));
                 }
+            }
+        }
+        // THE OTHER SIDE: permitted, and no fault touched it: success.
+        if let Some((a, _, allowed)) = expect {
+            let mut status: u16 = std::str::from_utf8(out.get(9..12).unwrap_or(b"0")).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+            // (A Datastar answer is 200 even when refused: its notice says
+            // which refusal, and that is judged as the status would be.)
+            if req.header(b"datastar-request").is_some() && find(out, b"class=\"notice bad\"").is_some() {
+                status = if find(out, b"a lot of changes").is_some() { 429 } else if find(out, b"Not allowed").is_some() { 403 } else { 500 };
+            }
+            let mut sh = self.sh.borrow_mut();
+            // (A 429 for a write only when the user's budget is really spent.)
+            let limit = status == 429 && ((req.method == b"GET" && req.header(b"datastar-request").is_none()) || sh.probe.int(P::Budget, &[Val::Int(asked.who as i64), Val::Int(cx.now_ms as i64)]).unwrap_or(0) >= 30);
+            // (A sync refused as malformed is right only if its batch is: the
+            // oracle decides that itself, applying it to the document as
+            // stored, read here.)
+            let bad_batch = |sh: &mut Shared| -> bool {
+                let (Some(body), ["edit", id, "sync"]) = (req.body.get(12..), parts.as_slice()) else { return false };
+                let rep = u32::from_le_bytes(req.body[8..12].try_into().expect("4"));
+                if !decodes(body) || !well_formed(body) {
+                    return true;
+                }
+                let mut i = 0;
+                while i < body.len() {
+                    let (op, n) = crate::crdt::decode(body, i).expect("decodes");
+                    if let crate::crdt::Op::Ins { rep: r, .. } = op {
+                        if r != rep {
+                            return true;
+                        }
+                    }
+                    i = n;
+                }
+                match sh.probe.doc(num(id)) {
+                    Ok(mut d) => d.apply_batch(body, &mut ()).is_err(),
+                    Err(_) => false,
+                }
+            };
+            // (Input the oracle itself judges bad may be refused: not an
+            // image, 415; not a post address, 400.)
+            let bad_input = match parts.as_slice() {
+                ["upload", _] => status == 415 && !is_image(req.body),
+                // (Operations only under a replica number this writer was given.)
+                ["edit", id, "sync"] if req.body.len() > 12 => {
+                    let rep = u32::from_le_bytes(req.body[8..12].try_into().expect("4"));
+                    status == 403 && sh.probe.int(P::RepOwner, &[Val::Int(num(id) as i64), Val::Int(rep as i64)]) != Some(asked.who as i64)
+                }
+                ["dash", _, "posts"] => status == 400 && crate::form::Form::parse(req.body).as_ref().and_then(|f| f.get("slug")).map(str::trim).is_some_and(|s| !s.is_empty() && !slug_ok(s)),
+                _ => false,
+            };
+            let refused_ok = (allowed.contains(&status) && (status != 429 || limit)) || (status == 400 && bad_batch(&mut sh)) || bad_input;
+            if !cx.park && self.injected.get() == faults && !(200..400).contains(&status) && !refused_ok {
+                sh.violation(asked.user, &asked.what, format!("the law permits this ({:?} by user {}) and no fault was injected, but the answer was {status}", DebugAction(a), asked.who));
             }
         }
         if cx.park {
@@ -463,11 +814,31 @@ impl App for Checked {
         keep
     }
 
+    fn gone(&mut self, conn: u64) {
+        self.site.gone(conn);
+        self.parked.remove(&conn);
+    }
+
     fn ready(&mut self, now_ms: u64, answers: &mut Vec<(u64, Vec<u8>)>) {
         let n = answers.len();
         self.site.ready(now_ms, answers);
         for (conn, bytes) in &answers[n..] {
             if let Some(asked) = self.parked.remove(conn) {
+                // PUSH, NOT POLLING: a wait is answered empty only when its
+                // time is up (else it waits for a change).
+                let body = find(bytes, b"\r\n\r\n").map_or(&bytes[..0], |e| &bytes[e + 4..]);
+                if asked.doc_wait && bytes.get(9..12) == Some(b"200") && body.len() == 10 && body[0] == 0 && body[9] == 0 && now_ms < asked.parked_at + 3000 - 50 {
+                    self.sh.borrow_mut().violation(asked.user, &asked.what, format!("a wait answered with nothing after {} ms, before its time (3000 ms)", now_ms - asked.parked_at));
+                }
+                // ...and a change by someone else, stored while it waited,
+                // wakes it at once (not at the end of its time).
+                if asked.doc_wait {
+                    let mut sh = self.sh.borrow_mut();
+                    let late = sh.changed.iter().find(|(p, r, t)| *p == asked.post && *r != asked.me && *t > asked.parked_at && now_ms > *t + 500).map(|x| x.2);
+                    if let Some(t) = late {
+                        sh.violation(asked.user, &asked.what, format!("a change to post {} at {t} ms woke this wait only {} ms later", asked.post, now_ms - t));
+                    }
+                }
                 check(&mut self.sh.borrow_mut(), &asked, bytes);
             }
         }
@@ -519,6 +890,10 @@ fn check(sh: &mut Shared, a: &Asked, resp: &[u8]) {
             }
         }
     }
+    // A JSON answer a browser's JSON.parse would refuse.
+    if find(head, b"application/json").is_some() && super::client::parse_json(body).is_none() {
+        problems.push(format!("a JSON answer that does not parse: {:?}", String::from_utf8_lossy(&body[..body.len().min(120)])));
+    }
     let html = find(head, b"text/html").is_some();
     if html {
         for b in bodies(body) {
@@ -536,6 +911,50 @@ fn check(sh: &mut Shared, a: &Asked, resp: &[u8]) {
     }
     if sh.quiet && status >= 500 {
         problems.push(format!("a failure ({status}) with no faults injected"));
+    }
+    // The form replaced the text: the document is now exactly it; what it
+    // replaced counts as deleted (not lost), what it says as acknowledged.
+    if let (Some((pid, text, before)), 303) = (&a.replace, status) {
+        // (Whatever was in the text, acknowledged or still on its way back
+        // to its writer, is replaced: deleted, not lost.)
+        for t in before {
+            if !text.contains(t.as_str()) {
+                sh.deleted.insert(t.clone());
+            }
+        }
+        match sh.probe.doc_text(*pid) {
+            Ok(t) if &t == text => {}
+            Ok(t) => problems.push(format!("the form's text did not become the post's ({} bytes sent, {} there)", text.len(), t.len())),
+            Err(e) => problems.push(format!("the post's document does not load after a form save: {e}")),
+        }
+        let pnum = sh.pnum(*pid);
+        let acked = std::mem::take(&mut sh.acked);
+        for (p, _, t) in &acked {
+            if p == pid && !text.contains(t.as_str()) {
+                sh.deleted.insert(t.clone());
+            }
+        }
+        sh.acked = acked;
+        if let Some(pnum) = pnum {
+            for (k, _, t) in tokens(text.as_bytes()) {
+                if k == b't' {
+                    sh.acked.push((*pid, pnum, t));
+                }
+            }
+        }
+    }
+    // An image is what was uploaded, byte for byte.
+    if let (Some(k), 200) = (&a.image, status) {
+        match sh.images.get(k) {
+            Some(b) if b.as_slice() == body => {}
+            Some(_) => problems.push(format!("image {k} is not what was uploaded")),
+            None => problems.push(format!("image {k}, which nobody uploaded")),
+        }
+    }
+    if let (Some((which, key, page)), 200) = (&a.feed, status) {
+        if let Err(e) = feed_ok(sh, *which, key, *page, body) {
+            problems.push(format!("a feed page wrong: {e}"));
+        }
     }
     if a.dash && status == 200 && a.who == 0 {
         problems.push("the dashboard, with no valid session (by the wall clock)".into());

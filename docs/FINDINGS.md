@@ -210,6 +210,54 @@ version, found the two worst bugs in this one within minutes.
     on lines it never runs; 76% of the server's lines run).
   "Catches all eight known bugs" said less than it seemed: it was built
   knowing them.
+- **Making it strong (2026-09-28), measured on the same 60 mutants**
+  (`tools/mutants-sample1.json`; equivalent ones judged in
+  `tools/mutants-equivalent.txt`, each with its reason):
+
+  | Stage | Non-equivalent mutants killed | Line coverage |
+  |---|---|---|
+  | Before | 12 of 56 (21%) | 76.3% |
+  | 1: workflow tools only (no change to the simulation) | 12 of 56 (21%) | 76.3% |
+  | 2: its blind spots | 40 of 51 (78%) | 91.2% |
+
+  What stage 2 added, each seen killing a mutant before it counted: the
+  other side of the law (allowed actions must succeed; everyone signs in
+  at the end); strict clients (JSON parsed whole; attributes read from
+  their element); kept-alive connections and edge-triggered reads; a
+  local edit is exactly the splice; no acknowledged edit is lost; feeds
+  and pages exact; every buffer, slot and wait freed; stored batches
+  well-formed; images byte for byte and only images; post addresses;
+  the write budget and the mail limit; changes wake waits at once; likes,
+  replies, "more comments", uploads, the form without JavaScript,
+  recovery by email, snapshots; forged batches; swarm testing. Two first
+  tries at invariants could not fail: the splice check skipped edits that
+  made no operations (which was the bug it was for), and the feed check
+  ignored links to posts that no longer exist. Mail floods at first all
+  went by recovery, so the sign-up path's limit was never pressed.
+  The 11 mutants left: nine are out of reach at the simulation's scale
+  (limits of 256 MB, 512 MB, 8 MB and 1 MiB; caches of 100,000 users and
+  20,000 feeds; counters near 4 billion; the check of a snapshot, which
+  only the server's own make); one is a banner's wording; one (a query's
+  deadline left set, `db.rs:380`) shows only when a long statement
+  follows a stale deadline, and was caught in one run of the sample and
+  not the next.
+- **Bugs the stronger simulation found** (each fixed, each in
+  `tools/sim_acceptance.py`):
+  - a snapshot sent to an editor that had loaded an empty post (since 0
+    means both "nothing yet" and "an empty document"): it replaced the
+    editor's document, dropping its edits not yet stored, which the
+    server then never sent back (its own). `web/editor.js` did the same.
+    The editor now says when it has nothing (`&load=1`); only then is a
+    snapshot sent;
+  - a parked request answered with `Connection: close` kept its
+    connection open;
+  - waits kept after their clients left, holding places in the limits.
+  Harness mistakes on the way (each a false alarm, fixed in the harness):
+  acknowledgements recorded when the client heard rather than when the
+  server stored; form bodies whose tokens reused an old token's
+  characters; a person made to lose a passkey they never had; the clock
+  moved an hour from now rather than from the latest it ever read;
+  Datastar refusals (a 200 with a notice) read as successes.
 - **The simulation's own mistakes, before it was right**: four false
   alarms (two writers' tokens alike; the template's "[deleted]"
   placeholder taken for rendered text; random deletions splicing two

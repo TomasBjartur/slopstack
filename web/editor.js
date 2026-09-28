@@ -562,7 +562,9 @@ function start(ta) {
     const body = request(r, batches, n, size);
     if (n) show("Saving…", "busy");
     try {
-      const res = await fetch(url + "?me=" + rep, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body, credentials: "same-origin" });
+      // (&load=1 until the document is here: only then may the answer be a
+      // snapshot, which replaces the document.)
+      const res = await fetch(url + "?me=" + rep + (loaded ? "" : "&load=1"), { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body, credentials: "same-origin" });
       if (!res.ok) {
         if (res.status === 403) show("Not saved: you are logged out, or no longer an author here. Your text is kept on this device.", "off", true);
         else show(res.status === 409 ? "Not saved: this post has reached its limit of stored edits. Your text is kept here; copy it into a new post."

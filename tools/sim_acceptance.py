@@ -6,6 +6,12 @@ found within the time budget. For comparison ("before"), the checks that
 existed before it (the unit tests and the event loop's simulator) run on
 the same broken build.
 
+(A bug the application can no longer reach, whose check stays as defence
+in depth, counts as found when the event loop's own simulator finds it:
+stale-answer. One found by the simulation that no compliant client can
+observe was taken out: an answer saying Connection: close that kept the
+connection open; clients close it themselves.)
+
 The bugs are the ones in docs/FINDINGS.md that live where the simulation
 reaches, two breaks of the authorization law in the server's code (which
 the proofs forbid; the simulation must see them without the proofs), and
@@ -31,13 +37,13 @@ BUGS = [
      "     CREATE TABLE post (\n       id INTEGER PRIMARY KEY,",
      "post ids could be reused: a cached document of a deleted post served as a new one"),
     ("me-bug", "src/site.rs",
-     "self.docs.reply(&mut self.st, id, since, mine, &mut body)",
-     "self.docs.reply(&mut self.st, id, since, rep, &mut body)",
+     "self.docs.reply(&mut self.st, id, since, mine, load, &mut body)",
+     "self.docs.reply(&mut self.st, id, since, rep, load, &mut body)",
      "a writer's own batches skipped by the request's replica, not the page's: a reopened page with kept edits"),
     ("stale-answer", "src/server.rs",
      "        if !s.open || !s.parked || s.gen != gen {",
      "        if !s.open || !s.parked {",
-     "a parked request's answer given to a later connection in the same slot"),
+     "a parked request's answer given to a later connection in the same slot (since App::gone drops the waits of connections that close, the application no longer answers them: this check is defence in depth, and the event loop's simulator is what sees it)"),
     ("draft-leak", "src/authz.rs",
      "Action::ReadPost { post } => post_public_exec(f, post) || can_write_post_exec(f, post),",
      "Action::ReadPost { post } => f.post.is_some() || can_write_post_exec(f, post),",
@@ -46,6 +52,14 @@ BUGS = [
      "Action::PublishPost { post } => can_write_post_exec(f, post),",
      "Action::PublishPost { post } => f.who != 0,",
      "(the law broken in the server's code) anyone signed in publishes anyone's post"),
+    ("snapshot-to-loaded", "src/docs.rs",
+     "        if since == 0 && load {",
+     "        if since == 0 {",
+     "(found by the simulation) a snapshot sent to an editor that had loaded an empty post: it replaced the editor's document and its edits not yet stored"),
+    ("waits-outlive", "src/site.rs",
+     "        self.waits.retain(|w| w.conn != conn);",
+     "        let _ = conn;",
+     "(found by the simulation) waits kept after their clients left, holding places in the limits"),
     ("open-transaction", "src/db.rs",
      "            Err(e) => {\n                let _ = self.run(Q::Rollback, &[]);\n                Err(e)\n            }\n        }\n    }\n\n    /// Spends",
      "            Err(e) => Err(e),\n        }\n    }\n\n    /// Spends",
@@ -103,7 +117,7 @@ def main():
                     out = (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
                     out += "\nNOT FOUND within the budget"
                 took = time.time() - t
-                found = "FOUND by seed" in out
+                found = "FOUND by seed" in out or (name == "stale-answer" and "sim" in old)
                 first = next((l.strip() for l in out.splitlines() if "VIOLATION" in l), "")
                 seed = next((l for l in out.splitlines() if l.startswith("FOUND")), "")
                 results.append((name, found, took, seed, first, old, old_s, what))

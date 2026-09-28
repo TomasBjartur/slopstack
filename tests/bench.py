@@ -19,7 +19,10 @@ Substack post over the internet.
 - Substack: one real post: bytes, JS, and browser metrics (its TTFB
   includes the internet; ours does not: compare the rest).
 Writes docs/bench.json and prints a table.
-usage: tests/bench.py   (needs ~/web built: build/server, baseline/next)"""
+usage: tests/bench.py   (needs ~/web built: build/server, baseline/next)
+       tests/bench.py --server [BINARY]   this server alone: requests a
+       second, latency and CPU per request on the four pages (to compare
+       two builds of it, e.g. before and after a change; a minute)"""
 import gzip, json, os, re, socket, sqlite3, statistics, subprocess, sys, tempfile, time, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -88,7 +91,34 @@ def substack():
                  "js": len(js) + len(inline), "js_gz": len(gzip.compress(js)) + len(gzip.compress(inline))}
 
 
+def server_only(binary):
+    """This server alone, on the same data: throughput, latency and CPU."""
+    tmp = tempfile.mkdtemp()
+    old_db, new_db = os.path.join(tmp, "old.db"), os.path.join(tmp, "new.db")
+    O["make_db"](old_db)
+    subprocess.run([sys.executable, os.path.join(ROOT, "tools/import_old.py"), old_db, new_db], check=True, stdout=subprocess.DEVNULL)
+    q = sqlite3.connect(old_db)
+    slug, blog = q.execute("SELECT p.slug, b.slug FROM post p JOIN blog b ON b.id = p.blog_id WHERE b.id = 7 AND p.id NOT IN (SELECT post_id FROM comment) LIMIT 1").fetchone()
+    q.close()
+    pages = {"home": "/", "blog": f"/b/{blog}", "post": f"/b/{blog}/{slug}", "author": "/u/writer_7"}
+    proc = subprocess.Popen(["taskset", "-c", "0", binary], env=dict(os.environ, BLOG_DB=new_db, PORT=str(NEW)), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_port(NEW)
+        for path in pages.values():
+            for _ in range(30):
+                get(NEW, path)
+        for page, path in pages.items():
+            s_ = load(NEW, path)
+            cpu = cpu_per_request(proc.pid, NEW, path)
+            print(f"  {page:7} {s_['req_s']:>8.0f} req/s  p50 {s_['p50_us'] / 1000:6.2f} ms  p99 {s_['p99_us'] / 1000:6.2f} ms  cpu {cpu:6.1f} us")
+    finally:
+        proc.terminate()
+
+
 def main():
+    if "--server" in sys.argv:
+        i = sys.argv.index("--server")
+        return server_only(sys.argv[i + 1] if len(sys.argv) > i + 1 else os.path.join(ROOT, "build/server"))
     tmp = tempfile.mkdtemp()
     old_db = os.path.join(tmp, "old.db")
     new_db = os.path.join(tmp, "new.db")

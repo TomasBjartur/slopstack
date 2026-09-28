@@ -1350,7 +1350,9 @@ impl Site {
         // read moves it, and wakes the wait.)
         let seen = self.changes.get(Kind::Doc, id);
         let mut body = Vec::new();
-        self.docs.reply(&mut self.st, id, since, mine, &mut body).map_err(no_code)?;
+        // (?load=1: the editor has nothing yet: a snapshot may start it.)
+        let load = q.get("load") == Some("1");
+        self.docs.reply(&mut self.st, id, since, mine, load, &mut body).map_err(no_code)?;
         if wait && nothing_new(&body) && self.park(r, id, Waiting::Doc { since, rep: mine }, seen) {
             return Ok(());
         }
@@ -1409,7 +1411,7 @@ impl Site {
             return true;
         }
         let mut body = Vec::new();
-        if self.docs.reply(&mut self.st, post, since, rep, &mut body).is_err() {
+        if self.docs.reply(&mut self.st, post, since, rep, false, &mut body).is_err() {
             crate::server::error(out, 503);
             return true;
         }
@@ -1870,6 +1872,12 @@ impl App for Site {
         if !self.waits.is_empty() {
             self.answer_waits(now_ms, answers);
         }
+    }
+
+    fn gone(&mut self, conn: u64) {
+        // (Its client left: the wait is dropped now, not at its end, so it
+        // holds no place in the limits meanwhile.)
+        self.waits.retain(|w| w.conn != conn);
     }
 
     fn handle(&mut self, req: &Request, cx: &mut Ctx, out: &mut Vec<u8>) -> bool {

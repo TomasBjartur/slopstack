@@ -21,6 +21,10 @@ fn ok(out: &mut Vec<u8>, body: &[u8], head: bool) {
 }
 
 impl App for Site {
+    fn gone(&mut self, conn: u64) {
+        self.parked.retain(|(c, _, _)| *c != conn);
+    }
+
     fn ready(&mut self, now_ms: u64, answers: &mut Vec<(u64, Vec<u8>)>) {
         self.parked.retain(|(conn, due, body)| {
             if now_ms < *due {

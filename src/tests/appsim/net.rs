@@ -18,8 +18,12 @@ pub struct Conn {
     /// The worker that accepted it (usize::MAX: waiting to be accepted).
     pub worker: usize,
     pub slot: u32,
-    /// Bytes on the way, each with when it arrives.
-    up: VecDeque<(u64, Vec<u8>)>,
+    /// Bytes on the way, each with when it arrives (and a number: which
+    /// have been reported to the server, edge-triggered).
+    up: VecDeque<(u64, Vec<u8>, u64)>,
+    sent: u64,
+    reported: u64,
+    close_reported: bool,
     down: VecDeque<(u64, Vec<u8>)>,
     /// When each side's close reaches the other (u64::MAX: not closed).
     client_closed: u64,
@@ -27,6 +31,10 @@ pub struct Conn {
     /// Ended without the server's close (refused, or its worker crashed).
     pub reset: bool,
     lat: u64,
+    /// The last request line sent on it, and what the client did with it
+    /// last (for reports).
+    pub last: String,
+    pub state: &'static str,
 }
 
 pub struct Net {
@@ -44,11 +52,15 @@ pub struct Net {
     /// Everything clients have received, folded into one number (a run's
     /// fingerprint: the same seed must give the same one).
     pub digest: u64,
+    /// Idle kept-alive connections by user (as a browser keeps them), with
+    /// when each fell idle; and which users' browsers keep connections.
+    idle: Map<usize, Vec<(usize, u64)>>,
+    pub keeps: Vec<bool>,
 }
 
 impl Net {
     pub fn new(seed: u64) -> Net {
-        Net { now: 0, skew: 0, rng: Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1), conns: vec![], backlog: VecDeque::new(), slots: map(), rough: true, digest: 0xcbf2_9ce4_8422_2325 }
+        Net { now: 0, skew: 0, rng: Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1), conns: vec![], backlog: VecDeque::new(), slots: map(), rough: true, digest: 0xcbf2_9ce4_8422_2325, idle: map(), keeps: vec![] }
     }
 
     pub fn wall(&self) -> u64 {
@@ -58,19 +70,90 @@ impl Net {
     /// A client connects and sends bytes (in pieces, after the latency).
     pub fn connect(&mut self, bytes: Vec<u8>) -> usize {
         let lat = 1 + if self.rough && self.rng.below(10) == 0 { self.rng.below(400) } else { self.rng.below(15) };
-        let mut up = VecDeque::new();
+        self.conns.push(Conn { worker: usize::MAX, slot: 0, up: VecDeque::new(), sent: 0, reported: 0, close_reported: false, down: VecDeque::new(), client_closed: u64::MAX, server_closed: u64::MAX, reset: false, lat, last: String::new(), state: "sent" });
+        let c = self.conns.len() - 1;
+        self.put(c, &bytes);
+        self.backlog.push_back(c);
+        c
+    }
+
+    /// Bytes from the client on a connection, in pieces, after its latency.
+    fn put(&mut self, c: usize, bytes: &[u8]) {
+        let lat = self.conns[c].lat;
+        self.conns[c].last = String::from_utf8_lossy(&bytes[..bytes.iter().position(|&b| b == b'\r').unwrap_or(bytes.len())]).to_string();
         let mut at = 0;
         let mut t = self.now + lat;
         while at < bytes.len() {
             let n = if self.rough && self.rng.below(4) == 0 { 1 + self.rng.below((bytes.len() - at) as u64) as usize } else { bytes.len() - at };
-            up.push_back((t, bytes[at..at + n].to_vec()));
+            self.conns[c].sent += 1;
+            let seq = self.conns[c].sent;
+            self.conns[c].up.push_back((t, bytes[at..at + n].to_vec(), seq));
             at += n;
             t += self.rng.below(3);
         }
-        self.conns.push(Conn { worker: usize::MAX, slot: 0, up, down: VecDeque::new(), client_closed: u64::MAX, server_closed: u64::MAX, reset: false, lat });
-        let c = self.conns.len() - 1;
-        self.backlog.push_back(c);
-        c
+    }
+
+    /// A request from a user: on a kept connection of theirs if one is
+    /// idle and still open (as a browser reuses them), else a new one.
+    /// Answers the connection and whether it may be kept after.
+    pub fn request(&mut self, user: usize, bytes: Vec<u8>, keep: bool) -> usize {
+        if keep {
+            let now = self.now;
+            let mut pool = self.idle.remove(&user).unwrap_or_default();
+            // (A browser drops what has been idle long: the server's own limit is 60 s.)
+            for &(c, at) in pool.iter().filter(|(_, at)| now - at > 50_000) {
+                let _ = at;
+                self.client_close(c);
+            }
+            pool.retain(|(_, at)| now - at <= 50_000);
+            while let Some((c, _)) = pool.pop() {
+                if self.open(c) {
+                    self.idle.insert(user, pool);
+                    self.conns[c].state = "sent again";
+                    self.put(c, &bytes);
+                    return c;
+                }
+            }
+            self.idle.insert(user, pool);
+        }
+        self.connect(bytes)
+    }
+
+    /// A kept connection, idle again.
+    pub fn release(&mut self, user: usize, c: usize) {
+        self.conns[c].state = "released";
+        if self.open(c) {
+            let now = self.now;
+            self.idle.entry(user).or_default().push((c, now));
+        }
+    }
+
+    /// Kept connections closed as browsers shut, but some browsers leave
+    /// theirs open (then the server's idle timeout must close them).
+    pub fn close_idle(&mut self) {
+        let mut all: Vec<(usize, usize)> = self.idle.iter().flat_map(|(u, v)| v.iter().map(move |x| (*u, x.0))).collect();
+        all.sort_unstable();
+        self.idle.clear();
+        for (u, c) in all {
+            if u % 2 == 0 {
+                self.client_close(c);
+            }
+        }
+    }
+
+    /// (Debugging: the state of a worker's connections still open.)
+    pub fn describe(&self, w: usize) -> Vec<String> {
+        let mut v: Vec<String> = self.slots.iter().filter(|((ww, _), _)| *ww == w).map(|((_, s), &c)| {
+            let k = &self.conns[c];
+            format!("slot {s} conn {c} ({}, {}): up {:?} down {} client_closed {} server_closed {} reset {}", k.last, k.state, k.up.iter().map(|x| (x.0, x.1.len())).collect::<Vec<_>>(), k.down.len(), k.client_closed, k.server_closed, k.reset)
+        }).collect();
+        v.sort();
+        v
+    }
+
+    fn open(&self, c: usize) -> bool {
+        let k = &self.conns[c];
+        !k.reset && k.server_closed == u64::MAX && k.client_closed == u64::MAX
     }
 
     /// What has reached the client: the bytes, and whether the connection
@@ -92,6 +175,7 @@ impl Net {
 
     /// The client closes (gives up, goes offline, closes the page).
     pub fn client_close(&mut self, c: usize) {
+        self.conns[c].state = "closed";
         let now = self.now;
         let k = &mut self.conns[c];
         if k.client_closed == u64::MAX {
@@ -151,15 +235,26 @@ impl Io for WorkerIo {
 
     fn wait(&mut self, out: &mut Vec<IoEvent>, _timeout_ms: u64) {
         // (The harness moves time; a wait only reports what is ready now.)
-        let n = self.net.borrow();
+        // Reads are EDGE-TRIGGERED, as the server asks epoll (EPOLLET): a
+        // connection is reported readable once when new bytes (or its
+        // close) arrive, not again while they sit unread. A server that
+        // stops reading early is left waiting, as it would be.
+        let mut n = self.net.borrow_mut();
+        let now = n.now;
         if !n.backlog.is_empty() {
             out.push(IoEvent { slot: LISTENER, read: true, write: false });
         }
         let mut mine: Vec<(u32, usize)> = n.slots.iter().filter(|((w, _), _)| *w == self.w).map(|((_, s), &c)| (*s, c)).collect();
         mine.sort_unstable();
         for (slot, c) in mine {
-            let k = &n.conns[c];
-            let readable = k.up.front().is_some_and(|(t, _)| *t <= n.now) || (k.up.is_empty() && k.client_closed <= n.now);
+            let k = &mut n.conns[c];
+            let newest = k.up.iter().filter(|(t, _, _)| *t <= now).map(|x| x.2).max().unwrap_or(0);
+            let mut readable = newest > k.reported;
+            k.reported = k.reported.max(newest);
+            if k.client_closed <= now && !k.close_reported {
+                k.close_reported = true;
+                readable = true;
+            }
             out.push(IoEvent { slot, read: readable, write: true });
         }
     }
@@ -168,7 +263,7 @@ impl Io for WorkerIo {
         let mut n = self.net.borrow_mut();
         let now = n.now;
         // (Only connections whose first bytes could have arrived.)
-        let Some(pos) = n.backlog.iter().position(|&c| n.conns[c].up.front().map_or(true, |(t, _)| *t <= now)) else { return false };
+        let Some(pos) = n.backlog.iter().position(|&c| n.conns[c].up.front().map_or(true, |(t, _, _)| *t <= now)) else { return false };
         let c = n.backlog.remove(pos).expect("found");
         n.conns[c].worker = self.w;
         n.conns[c].slot = slot;
@@ -188,7 +283,7 @@ impl Io for WorkerIo {
         let now = n.now;
         let Some(k) = n.conn(self.w, slot) else { return Rd::Gone };
         match k.up.front_mut() {
-            Some((t, bytes)) if *t <= now => {
+            Some((t, bytes, _)) if *t <= now => {
                 let m = bytes.len().min(buf.len());
                 buf[..m].copy_from_slice(&bytes[..m]);
                 bytes.drain(..m);

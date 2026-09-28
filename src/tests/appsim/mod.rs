@@ -12,12 +12,16 @@
 // and the oracle (oracle.rs) checks every answer as it is made. At the end
 // everything is made quiet, and every open editor must show the server's
 // text. One seed replays exactly: everything that varies comes from it
-// (hash maps keyed by it, SQLite's clock-based deadlines off).
+// (hash maps keyed by it, SQLite's query deadlines on the simulated clock).
 //
 // usage: build/server test appsim                  the check's budget
 //        build/server test appsim SEED [SECONDS]   one seed (to replay)
 //        build/server test appsim sweep FROM TO [SECONDS]
 //                                                  seeds until one fails
+// To look into a failure: APPSIM_TRACE=<text> prints every request or
+// answer holding it (a token, say) as the oracle sees it; APPSIM_TAB=<user>:<post>
+// prints that user's tabs on that post (loads, answers, edits);
+// APPSIM_KEEP=1 keeps the database file.
 pub mod client;
 pub mod law;
 pub mod net;
@@ -49,6 +53,21 @@ pub struct Shared {
     /// Faults have stopped: every answer must now be a success or a
     /// refusal, never a failure.
     pub quiet: bool,
+    /// Tokens the server acknowledged storing (post id, post, token), and
+    /// every token anyone deleted.
+    pub acked: Vec<(u64, usize, String)>,
+    pub deleted: std::collections::BTreeSet<String>,
+    /// Images uploaded, by key (the oracle compares what is served).
+    pub images: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Test mode (sign-up without email; no recovery).
+    pub direct: bool,
+    /// The oracle's own record of each user's writes that changed content
+    /// (wall-clock times), for the write budget.
+    pub budget: std::collections::BTreeMap<u64, Vec<u64>>,
+    /// Changes stored, by post, replica and time (monotonic).
+    pub changed: Vec<(u64, u32, u64)>,
+    /// Large pastes are on in this seed.
+    pub pastes: bool,
 }
 
 impl Shared {
@@ -76,6 +95,12 @@ impl Shared {
 struct Faults {
     rng: Rng,
     on: bool,
+    /// Per 200,000 statements: errors, crashes (the seed's swarm).
+    error_rate: u64,
+    crash_rate: u64,
+    /// Every fault injected so far (the oracle compares it before and
+    /// after a request: a request no fault touched must not fail).
+    injected: Rc<std::cell::Cell<u64>>,
     errors: u64,
     crashes: u64,
 }
@@ -90,11 +115,13 @@ impl Faults {
             return Fault::None;
         }
         let r = self.rng.below(200_000);
-        if r < 50 {
+        if r < self.error_rate {
             self.errors += 1;
+            self.injected.set(self.injected.get() + 1);
             Fault::Error
-        } else if r < 62 {  // (about one statement in 17,000: a few crashes a run)
+        } else if r < self.error_rate + self.crash_rate {
             self.crashes += 1;
+            self.injected.set(self.injected.get() + 1);
             Fault::Crash
         } else {
             Fault::None
@@ -107,6 +134,56 @@ pub struct Config {
     pub secs: u64,
     pub workers: usize,
     pub people: usize,
+    pub swarm: Swarm,
+}
+
+/// SWARM TESTING: each seed runs its own mix. Some actions off, some
+/// several times as often; fault rates from none to heavy; the clock
+/// still or jumping; test mode or email; browsers that keep connections or
+/// not. (One seed in four runs the plain mix, everything at its default.)
+pub struct Swarm {
+    pub weights: Vec<u32>,
+    pub error_rate: u64,
+    pub crash_rate: u64,
+    pub jumps: bool,
+    pub rough: bool,
+    pub keep_share: u64,
+    pub direct: bool,
+    pub paste: u64,
+}
+
+impl Swarm {
+    pub fn of(seed: u64) -> Swarm {
+        let mut r = Rng(seed.wrapping_mul(0x5a17_3e11) | 1);
+        let plain = seed % 4 == 0;
+        let pick = |r: &mut Rng, xs: &[u64]| xs[r.below(xs.len() as u64) as usize];
+        let weights = users::ACTS.iter().map(|a| if plain { a.1 } else { a.1 * pick(&mut r, &[0, 1, 1, 2, 3]) as u32 }).collect();
+        Swarm {
+            weights,
+            error_rate: if plain { 50 } else { pick(&mut r, &[0, 25, 50, 150]) },
+            crash_rate: if plain { 12 } else { pick(&mut r, &[0, 6, 12, 36]) },
+            jumps: plain || r.below(3) != 0,
+            rough: plain || r.below(4) != 0,
+            keep_share: if plain { 7 } else { pick(&mut r, &[0, 5, 9, 10]) },
+            direct: if plain { true } else { r.below(2) == 0 },
+            paste: if plain { 3 } else { pick(&mut r, &[0, 3, 10]) },
+        }
+    }
+
+    fn describe(&self) -> String {
+        let off: Vec<&str> = users::ACTS.iter().zip(&self.weights).filter(|(_, w)| **w == 0).map(|(a, _)| a.0).collect();
+        format!(
+            "errors {}/200k, crashes {}/200k, clock {}, network {}, {}% keep connections, {}, pastes {}/1000{}",
+            self.error_rate,
+            self.crash_rate,
+            if self.jumps { "jumping" } else { "still" },
+            if self.rough { "rough" } else { "smooth" },
+            self.keep_share * 10,
+            if self.direct { "test mode" } else { "email" },
+            self.paste,
+            if off.is_empty() { String::new() } else { format!(", off: {}", off.join(", ")) }
+        )
+    }
 }
 
 pub struct Outcome {
@@ -122,16 +199,18 @@ fn worker(w: usize, path: &str, net: &Rc<RefCell<Net>>, sh: &Rc<RefCell<Shared>>
     st.db.busy_wait(0);
     let f = faults.clone();
     st.faults = Some(Box::new(move |q| f.borrow_mut().roll(q)));
-    let mut conf = Conf::new(ORIGIN, RP_ID, true);
+    let direct = sh.borrow().direct;
+    let mut conf = Conf::new(ORIGIN, RP_ID, direct);
     conf.wait_ms = 3000;
     let site = Site::new(st, conf, changes);
-    Server::new(WorkerIo { net: net.clone(), w }, Checked::new(site, sh.clone()))
+    let injected = faults.borrow().injected.clone();
+    Server::new(WorkerIo { net: net.clone(), w }, Checked::new(site, sh.clone(), injected))
 }
 
 pub fn run_seed(c: &Config) -> Outcome {
     let started = std::time::Instant::now();
     crate::hash::set_keys(c.seed.wrapping_mul(0x2545_f491_4f6c_dd1d), c.seed ^ 0x9e37_79b9_7f4a_7c15);
-    crate::sys::sqlite::deadlines(false);
+    crate::sys::sqlite::sim_clock(Some(0));
     let dir = if std::path::Path::new("/dev/shm").is_dir() { "/dev/shm".to_string() } else { std::env::temp_dir().to_string_lossy().to_string() };
     let path = format!("{dir}/appsim-{}-{}.db", std::process::id(), c.seed);
     let clean = |p: &str| {
@@ -142,11 +221,19 @@ pub fn run_seed(c: &Config) -> Outcome {
     clean(&path);
     drop(Store::open(&path).expect("the simulation's database"));
     let net = Rc::new(RefCell::new(Net::new(c.seed)));
-    let sh = Rc::new(RefCell::new(Shared { probe: Probe::open(&path), posts: vec![], violations: vec![], answers: 0, now: 0, people: c.people, quiet: false }));
-    let faults = Rc::new(RefCell::new(Faults { rng: Rng((c.seed ^ 0xfa01_7500) | 1), on: true, errors: 0, crashes: 0 }));
+    let sh = Rc::new(RefCell::new(Shared { probe: Probe::open(&path), posts: vec![], violations: vec![], answers: 0, now: 0, people: c.people, quiet: false, acked: vec![], deleted: Default::default(), images: Default::default(), direct: c.swarm.direct, budget: Default::default(), changed: vec![], pastes: c.swarm.paste > 0 }));
+    let faults = Rc::new(RefCell::new(Faults { rng: Rng((c.seed ^ 0xfa01_7500) | 1), on: true, error_rate: c.swarm.error_rate, crash_rate: c.swarm.crash_rate, injected: Rc::new(std::cell::Cell::new(0)), errors: 0, crashes: 0 }));
     let changes = crate::notify::Changes::private();
     let mut ws: Vec<Server<WorkerIo, Checked>> = (0..c.workers).map(|w| worker(w, &path, &net, &sh, &faults, changes)).collect();
     let mut users = Users::new(c.people, c.seed);
+    users.weights = c.swarm.weights.clone();
+    users.paste = c.swarm.paste;
+    net.borrow_mut().rough = c.swarm.rough;
+    // Most browsers keep connections; some users' do not (Connection: close).
+    {
+        let mut k = Rng(c.seed.wrapping_mul(0x51) | 1);
+        net.borrow_mut().keeps = (0..c.people).map(|_| k.below(10) < c.swarm.keep_share).collect();
+    }
     let mut rng = Rng(c.seed.wrapping_mul(31) | 1);
     let (mut jumps, mut ticks, mut restarts) = (0u64, 0u64, 0u64);
     let mut first_at = None;
@@ -161,18 +248,21 @@ pub fn run_seed(c: &Config) -> Outcome {
     }));
     let end = c.secs * 1000;
     let mut settle_from = u64::MAX;
+    let mut max_wall = 0u64;
     loop {
         let now = {
             let mut n = net.borrow_mut();
             n.now += 1 + rng.below(8);
             // THE WALL CLOCK jumps (weeks forward: sessions end; minutes back).
-            if n.rough && rng.below(6000) == 0 {
+            if settle_from == u64::MAX && c.swarm.jumps && rng.below(6000) == 0 {
                 n.skew += if rng.below(3) == 0 { -(rng.below(600_000) as i64) } else { (3_600_000 + rng.below(45 * 86_400_000)) as i64 };
                 jumps += 1;
             }
             n.now
         };
         sh.borrow_mut().now = now;
+        max_wall = max_wall.max(net.borrow().wall());
+        crate::sys::sqlite::sim_clock(Some(now));
         users.step(&mut net.borrow_mut(), &mut sh.borrow_mut());
         // Workers in a random order each step.
         let mut order: Vec<usize> = (0..ws.len()).collect();
@@ -208,6 +298,16 @@ pub fn run_seed(c: &Config) -> Outcome {
                     }
                 }
             }
+            // Counts kept on posts match what they count.
+            // At most 3 emails an hour to an address (the mail limit).
+            let flooded = s.probe.int(P::MailFlood, &[]).unwrap_or(0);
+            if flooded > 0 {
+                s.violation(usize::MAX, "mail", format!("{flooded} emails sent while their address already had 3 in the hour before"));
+            }
+            let wrong = s.probe.int(P::BadCounts, &[]).unwrap_or(0);
+            if wrong > 0 {
+                s.violation(usize::MAX, "counts", format!("{wrong} posts whose like or comment count is not the number of their likes or comments"));
+            }
             let min = s.probe.int(P::MinDate, &[]).unwrap_or(i64::MAX);
             if min < 1_600_000_000_000 {
                 s.violation(usize::MAX, "dates", format!("a stored date before 2020 ({min} ms since 1970): time stored that is not the wall clock's"));
@@ -221,6 +321,12 @@ pub fn run_seed(c: &Config) -> Outcome {
             settle_from = now;
             faults.borrow_mut().on = false;
             net.borrow_mut().rough = false;
+            // (An hour past the latest the wall clock ever read, whatever its
+            // jumps back: the mail limit, 3 an hour, lets everyone try again.)
+            let mut n = net.borrow_mut();
+            let target = max_wall + 3_660_000;
+            n.skew += target as i64 - n.wall() as i64;
+            drop(n);
             sh.borrow_mut().quiet = true;
             users.settle();
         }
@@ -233,7 +339,12 @@ pub fn run_seed(c: &Config) -> Outcome {
     {
         let mut s = sh.borrow_mut();
         if !users.settled() {
-            s.violation(usize::MAX, "the end", "two minutes after the faults stopped, editors still had edits to send or answers to wait for".into());
+            let stuck: Vec<String> = users.people.iter().filter(|p| p.last != 2).map(|p| p.describe()).collect();
+            if !stuck.is_empty() {
+                s.violation(usize::MAX, "the end", format!("two minutes after the faults stopped, users still could not sign in and see their dashboard: {stuck:?}"));
+            } else {
+                s.violation(usize::MAX, "the end", "two minutes after the faults stopped, editors still had edits to send or answers to wait for".into());
+            }
         }
         let wall = net.borrow().wall();
         for p in &users.people {
@@ -258,14 +369,62 @@ pub fn run_seed(c: &Config) -> Outcome {
             }
         }
     }
+    // NOTHING ACKNOWLEDGED IS LOST: every token the server said it stored
+    // is in its post's text, unless someone deleted it or the post is gone.
+    {
+        let mut s = sh.borrow_mut();
+        let acked = std::mem::take(&mut s.acked);
+        let mut texts: std::collections::BTreeMap<u64, Option<String>> = Default::default();
+        let mut lost = vec![];
+        for (pid, pnum, tok) in &acked {
+            if s.deleted.contains(tok) {
+                continue;
+            }
+            match s.probe.post(*pid) {
+                Some((_, _, ident)) if ident.contains(&format!("p{pnum}.")) => {}
+                _ => continue,
+            }
+            let text = texts.entry(*pid).or_insert_with(|| None);
+            if text.is_none() {
+                *text = s.probe.doc_text(*pid).ok();
+            }
+            if !text.as_deref().is_some_and(|t| t.contains(tok.as_str())) {
+                lost.push(format!("{tok} (post {pid})"));
+            }
+        }
+        if !lost.is_empty() {
+            s.violation(usize::MAX, "the end", format!("{} acknowledged edits lost, e.g. {:?}", lost.len(), &lost[..lost.len().min(4)]));
+        }
+    }
+    // EVERYTHING RELEASED: browsers shut (some leaving kept connections
+    // open), then past the server's idle timeout: no worker may hold a
+    // connection, a parked request, a buffer, a slot or a wait.
+    users.shut(&mut net.borrow_mut());
+    let until = net.borrow().now + crate::limits::IDLE_TIMEOUT_MS + 5000;
+    while net.borrow().now < until {
+        net.borrow_mut().now += 5;
+        for s in ws.iter_mut() {
+            s.turn(0);
+        }
+    }
+    {
+        let mut s = sh.borrow_mut();
+        for (w, srv) in ws.iter().enumerate() {
+            let waits = srv.app.site.sizes().parts.iter().find(|p| p.0 == "waiting requests").map_or(0, |p| p.1);
+            if srv.open_connections() != 0 || srv.parked() != 0 || srv.buffers_in_use() != (0, 0) || srv.bodies_in_use() != 0 || srv.slots_free() != crate::limits::CONN_MAX || waits != 0 {
+                s.violation(usize::MAX, "the end", format!("worker {w}, every client gone: {} connections open, {} parked, buffers in use {:?}, {} bodies, {} of {} slots free, {waits} waits kept; {:?}", srv.open_connections(), srv.parked(), srv.buffers_in_use(), srv.bodies_in_use(), srv.slots_free(), crate::limits::CONN_MAX, net.borrow().describe(w)));
+            }
+        }
+    }
     std::panic::set_hook(quiet_hook);
-    crate::sys::sqlite::deadlines(true);
+    crate::sys::sqlite::sim_clock(None);
     let n = net.borrow();
     let s = sh.borrow();
     let f = faults.borrow();
     let mut report = format!(
-        "seed {}: {} s simulated ({} s run), {} workers, {} people: {} answers checked, {} connections; {} worker crashes, {} database errors injected, {} clock jumps; {} editors converged",
+        "seed {} [{}]: {} s simulated ({} s run), {} workers, {} people: {} answers checked, {} connections; {} worker crashes, {} database errors injected, {} clock jumps; {} editors converged",
         c.seed,
+        c.swarm.describe(),
         n.now / 1000,
         started.elapsed().as_secs(),
         c.workers,
@@ -298,7 +457,11 @@ pub fn run_seed(c: &Config) -> Outcome {
 
 pub fn run(args: &[String]) {
     let num = |i: usize, d: u64| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
-    let cfg = |seed: u64, secs: u64| Config { seed, secs, workers: 3, people: 12 };
+    let cfg = |seed: u64, secs: u64| {
+        let mut r = Rng(seed.wrapping_mul(0x7f4a_7c15) | 1);
+        let plain = seed % 4 == 0;
+        Config { seed, secs, workers: if plain { 3 } else { 1 + r.below(4) as usize }, people: if plain { 12 } else { 6 + r.below(15) as usize }, swarm: Swarm::of(seed) }
+    };
     let show = |o: &Outcome, secs: u64, seed: u64| {
         println!("{}", o.report);
         for v in o.violations.iter().take(8) {

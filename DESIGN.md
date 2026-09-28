@@ -206,7 +206,7 @@ below is what it does; where it falls short is said.
   hash maps (a seeded hasher: `HashMap`'s own order is random per process
   and cache eviction depends on it), the database (SQLite is
   deterministic given the same statements; a file per run in /dev/shm;
-  its query deadlines, which read the real clock, off; a busy lock
+  its query deadlines on the simulated clock; a busy lock
   answers at once instead of sleeping). Checked: a seed gives the same
   digest of everything clients received, in one process and across two.
 - **Workers.** Several `Site`s in one process on one database and one set
@@ -241,13 +241,27 @@ below is what it does; where it falls short is said.
   every request is answered within 45 s or closed; memory stays within
   each cache's limit; once faults stop, nothing fails (no 5xx). At the
   end, every open editor of a member shows exactly the server's text.
+- **Swarm testing.** One seed in four runs the default mix; the others
+  turn actions off or up, fault rates from none to heavy, the clock still
+  or jumping, test mode or email, browsers that keep connections or not,
+  and 1 to 4 workers, 6 to 20 people.
+- **The network as it is**: connections kept alive and reused (as
+  browsers do), reads edge-triggered (as epoll gives them: a server that
+  stops reading early is left waiting), clients that parse strictly.
+- **Both sides of the law**: what is forbidden fails, and what is allowed
+  succeeds when no fault touched it (the limits and bad input aside,
+  each judged by the oracle's own reading); at the end, after faults
+  stop, everyone signs in and sees their dashboard; every stored change
+  wakes the waits on its post within half a second; every buffer, slot
+  and wait is free once the clients are gone.
 - **The simulator must find the bugs already found.** Its acceptance
   test (`tools/sim_acceptance.py`) puts back, one at a time, the bugs it
   should see (dates in monotonic time; reused post ids; a writer not sent
   an earlier page's edits; a stale answer to a reused connection; and the
-  two it found itself, and two breaks of the authorization law in the
-  server's code), and each must fail a seed within minutes. All eight are
-  found, each within 4 s of running (docs/FINDINGS.md). A simulator
+  bugs it found itself, and two breaks of the authorization law in the
+  server's code), and each must fail a seed within minutes
+  (docs/FINDINGS.md). Its strength is measured by mutation
+  (`tools/mutants.py`, CLAUDE.md "Simulation workflow"). A simulator
   that misses them is modelling the wrong world.
 - **What stays in real browsers**: layout and its cost, input methods,
   the DOM (a comment shown twice is a page fact), Datastar's behaviour,

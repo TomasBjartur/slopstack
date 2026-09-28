@@ -55,7 +55,8 @@ def dele(rep, ctr, n):
 
 def sync(sid, post, since, rep, ops=b"", me=None):
     """me: the asking page's own replica (default: rep, as a page sends its own)."""
-    st, body, _ = http("POST", f"/edit/{post}/sync?me={rep if me is None else me}", sid, struct.pack("<QI", since, rep) + ops, "application/octet-stream")
+    # (since 0: an editor loading: it may be sent a snapshot.)
+    st, body, _ = http("POST", f"/edit/{post}/sync?me={rep if me is None else me}{'&load=1' if since == 0 else ''}", sid, struct.pack("<QI", since, rep) + ops, "application/octet-stream")
     if st != 200:
         return st, None
     kind, seq, more = body[0], struct.unpack("<Q", body[1:9])[0], body[9]
