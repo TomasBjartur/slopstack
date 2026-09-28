@@ -185,6 +185,31 @@ version, found the two worst bugs in this one within minutes.
 
   All eight within four seconds of running (`tools/sim_acceptance.py`,
   about 15 minutes with the builds).
+- **But measured by mutation, it is weak (2026-09-28).** 60 random
+  mutants of the server's code (`tools/mutants.py 60 1`: a comparison
+  flipped, && and ||, true and false, an off-by-one, a statement
+  removed): the simulation kills 12 (20%), the fast checks before it 17
+  (28%), both together 21 (35%). Perhaps 8-10 survivors change nothing
+  that matters; most are blind spots:
+  - it checks that nothing forbidden happens, never that what is allowed
+    works: a server that refuses everything passes. Survivors: every
+    login refused; the registration challenge missing; every request
+    with a cookie answered 400; nobody allowed to edit any post. Users
+    saw refusals, which the oracle allows;
+  - its clients are lenient (a JSON quote removed; a browser's parser
+    would fail, the simulated one read on);
+  - every simulated request closes its connection: keep-alive, which
+    browsers use, never runs;
+  - no invariant that a local edit does what it says (deletes made to do
+    nothing, consistently everywhere, kept every replica converged), that
+    feeds show new posts, that paging is right, or that every buffer is
+    free at the end (the event loop's simulator caught two leaks it
+    missed);
+  - features it never uses: images, the form without JavaScript,
+    recovery, likes, replies, "more comments", snapshots (16 survivors
+    on lines it never runs; 76% of the server's lines run).
+  "Catches all eight known bugs" said less than it seemed: it was built
+  knowing them.
 - **The simulation's own mistakes, before it was right**: four false
   alarms (two writers' tokens alike; the template's "[deleted]"
   placeholder taken for rendered text; random deletions splicing two
